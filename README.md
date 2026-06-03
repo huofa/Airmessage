@@ -1,6 +1,6 @@
 # Airmessage
 
-Version: `0.1.0`
+Version: `0.1.1`
 
 一个极简 macOS 菜单栏小工具：到点时从桌面飞过一架小飞机，带一条低频消息提醒。
 
