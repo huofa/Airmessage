@@ -5,6 +5,7 @@ import Carbon.HIToolbox
 private enum DefaultsKey {
     static let message = "message"
     static let intervalMinutes = "intervalMinutes"
+    static let reminders = "reminders"
     static let isPaused = "isPaused"
     static let playSound = "playSound"
     static let selectedSound = "selectedSound"
@@ -18,6 +19,24 @@ private struct SoundChoice {
     let fileName: String
     let fileExtension: String
     let volume: Float
+}
+
+private struct ReminderItem: Codable, Identifiable, Equatable {
+    var id: String
+    var message: String
+    var nextFireAt: Date
+    var intervalMinutes: Int?
+    var flightRepeatCount: Int
+    var isEnabled: Bool
+
+    var isRepeating: Bool {
+        intervalMinutes != nil
+    }
+}
+
+private struct FlightJob {
+    let message: String
+    let repetitions: Int
 }
 
 private func airmessageHotKeyHandler(
@@ -40,10 +59,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let nextItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let pauseItem = NSMenuItem(title: "", action: #selector(togglePause), keyEquivalent: "")
     private let soundItem = NSMenuItem(title: "", action: #selector(toggleSound), keyEquivalent: "")
+    private let remindersMenuItem = NSMenuItem(title: "提醒列表", action: nil, keyEquivalent: "")
     private var soundChoiceItems: [NSMenuItem] = []
     private var controlPanel: ControlPanel?
     private var flightWindow: FlightWindow?
     private var flightSequenceTask: Task<Void, Never>?
+    private var flightQueue: [FlightJob] = []
+    private var isRunningFlightQueue = false
     private var flybyPlayer: AVAudioPlayer?
     private var hotKeyRef: EventHotKeyRef?
     private var hotKeyHandlerRef: EventHandlerRef?
@@ -51,7 +73,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localKeyMonitor: Any?
     private var reminderTimer: Timer?
     private var clockTimer: Timer?
-    private var nextReminderDate = Date()
+    private var reminders: [ReminderItem] = []
+    private var nextReminderDate: Date?
     private var isPaused = UserDefaults.standard.bool(forKey: DefaultsKey.isPaused)
     private let soundChoices = [
         SoundChoice(id: "long", title: "长空气声 11 秒", fileName: "flyby_long", fileExtension: "mp3", volume: 0.72),
@@ -128,13 +151,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ProcessInfo.processInfo.disableAutomaticTermination("Airmessage keeps reminder timers running.")
         NSApp.setActivationPolicy(.regular)
+        reminders = loadReminders()
         setupMenu()
-        scheduleNextReminder(from: Date())
+        scheduleNextReminder()
         startClock()
         startShortcutMonitoring()
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(600))
-            showFlight(message: message, repetitions: 1)
+            enqueueFlights([FlightJob(message: primaryReminder.message, repetitions: 1)])
         }
     }
 
@@ -162,9 +186,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(makeMenuItem(title: "现在试飞  ⌘⌥0", action: #selector(showReminderNow), keyEquivalent: ""))
         menu.addItem(pauseItem)
         menu.addItem(.separator())
-        menu.addItem(makeMenuItem(title: "修改提醒文字...", action: #selector(editMessage), keyEquivalent: "m"))
-        menu.addItem(makeMenuItem(title: "自定义间隔...", action: #selector(editInterval), keyEquivalent: "i"))
-        menu.addItem(makeMenuItem(title: "飞行次数...", action: #selector(editFlightRepeatCount), keyEquivalent: ""))
+        menu.addItem(makeMenuItem(title: "新建提醒...", action: #selector(addReminder), keyEquivalent: "n"))
+        menu.addItem(remindersMenuItem)
+        menu.addItem(makeMenuItem(title: "修改默认提醒文字...", action: #selector(editMessage), keyEquivalent: "m"))
+        menu.addItem(makeMenuItem(title: "默认提醒间隔...", action: #selector(editInterval), keyEquivalent: "i"))
+        menu.addItem(makeMenuItem(title: "默认飞行次数...", action: #selector(editFlightRepeatCount), keyEquivalent: ""))
         menu.addItem(makeMenuItem(title: "飞行时长...", action: #selector(editFlightDuration), keyEquivalent: ""))
 
         let presets = NSMenu()
@@ -287,16 +313,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return scalars.reduce(OSType(0)) { ($0 << 8) + OSType($1.value) }
     }()
 
-    private func scheduleNextReminder(from date: Date) {
-        reminderTimer?.invalidate()
-        nextReminderDate = date.addingTimeInterval(intervalMinutes * 60)
+    private var primaryReminder: ReminderItem {
+        if let enabled = reminders.first(where: { $0.isEnabled }) {
+            return enabled
+        }
+        if let first = reminders.first {
+            return first
+        }
+        return ReminderItem(
+            id: UUID().uuidString,
+            message: message,
+            nextFireAt: Date().addingTimeInterval(intervalMinutes * 60),
+            intervalMinutes: Int(intervalMinutes),
+            flightRepeatCount: flightRepeatCount,
+            isEnabled: true
+        )
+    }
 
-        guard !isPaused else {
+    private func loadReminders() -> [ReminderItem] {
+        if let data = UserDefaults.standard.data(forKey: DefaultsKey.reminders),
+           let saved = try? JSONDecoder().decode([ReminderItem].self, from: data),
+           !saved.isEmpty {
+            return saved
+        }
+
+        return [
+            ReminderItem(
+                id: UUID().uuidString,
+                message: message,
+                nextFireAt: Date().addingTimeInterval(intervalMinutes * 60),
+                intervalMinutes: Int(intervalMinutes),
+                flightRepeatCount: flightRepeatCount,
+                isEnabled: true
+            )
+        ]
+    }
+
+    private func saveReminders() {
+        if let data = try? JSONEncoder().encode(reminders) {
+            UserDefaults.standard.set(data, forKey: DefaultsKey.reminders)
+        }
+    }
+
+    private func scheduleNextReminder() {
+        reminderTimer?.invalidate()
+        nextReminderDate = reminders
+            .filter(\.isEnabled)
+            .map(\.nextFireAt)
+            .min()
+
+        guard !isPaused, let nextReminderDate else {
             updateMenu()
             return
         }
 
-        reminderTimer = Timer.scheduledTimer(withTimeInterval: intervalMinutes * 60, repeats: false) { [weak self] _ in
+        let interval = max(1, nextReminderDate.timeIntervalSinceNow)
+        reminderTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.fireReminder()
             }
@@ -305,14 +377,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func fireReminder() {
-        showFlight(message: message, repetitions: flightRepeatCount)
-        scheduleNextReminder(from: Date())
+        let now = Date()
+        var jobs: [FlightJob] = []
+        for index in reminders.indices {
+            guard reminders[index].isEnabled, reminders[index].nextFireAt <= now.addingTimeInterval(0.5) else {
+                continue
+            }
+
+            jobs.append(FlightJob(message: reminders[index].message, repetitions: reminders[index].flightRepeatCount))
+            if let minutes = reminders[index].intervalMinutes {
+                repeat {
+                    reminders[index].nextFireAt = reminders[index].nextFireAt.addingTimeInterval(TimeInterval(minutes * 60))
+                } while reminders[index].nextFireAt <= now
+            } else {
+                reminders[index].isEnabled = false
+            }
+        }
+
+        saveReminders()
+        if !jobs.isEmpty {
+            enqueueFlights(jobs)
+        }
+        scheduleNextReminder()
     }
 
-    private func showFlight(message: String, repetitions: Int) {
-        flightSequenceTask?.cancel()
+    private func enqueueFlights(_ jobs: [FlightJob]) {
+        flightQueue.append(contentsOf: jobs)
+        guard !isRunningFlightQueue else { return }
+        runFlightQueue()
+    }
+
+    private func runFlightQueue() {
+        guard !flightQueue.isEmpty else {
+            isRunningFlightQueue = false
+            return
+        }
+
+        isRunningFlightQueue = true
+        let job = flightQueue.removeFirst()
         flightSequenceTask = Task { @MainActor in
-            let count = max(1, repetitions)
+            let count = max(1, job.repetitions)
             for index in 0..<count {
                 if Task.isCancelled { return }
 
@@ -321,9 +425,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
 
                 if flightWindow == nil {
-                    flightWindow = FlightWindow(message: message)
+                    flightWindow = FlightWindow(message: job.message)
                 } else {
-                    flightWindow?.setMessage(message)
+                    flightWindow?.setMessage(job.message)
                 }
 
                 await withCheckedContinuation { continuation in
@@ -338,6 +442,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(2))
                 }
             }
+
+            runFlightQueue()
         }
     }
 
@@ -376,6 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         nextItem.title = "下次提醒：\(pauseText)"
         pauseItem.title = isPaused ? "继续提醒" : "暂停提醒"
         soundItem.title = playSound ? "提示音：开" : "提示音：关"
+        rebuildRemindersMenu()
         soundChoiceItems.forEach { item in
             item.state = (item.representedObject as? String) == selectedSoundID ? .on : .off
         }
@@ -383,6 +490,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func formattedRemainingTime() -> String {
+        guard let nextReminderDate else {
+            return reminders.isEmpty ? "无提醒" : "无启用提醒"
+        }
+
         let seconds = max(0, Int(nextReminderDate.timeIntervalSinceNow.rounded()))
         if seconds < 60 {
             return "\(seconds) 秒后"
@@ -393,14 +504,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showReminderNow() {
-        showFlight(message: message, repetitions: flightRepeatCount)
+        enqueueFlights([FlightJob(message: primaryReminder.message, repetitions: primaryReminder.flightRepeatCount)])
     }
 
     @objc private func showControlPanel() {
         if controlPanel == nil {
             controlPanel = ControlPanel(
-                getMessage: { [weak self] in self?.message ?? "该喝水啦" },
-                getInterval: { [weak self] in self?.intervalMinutes ?? 45 },
+                getMessage: { [weak self] in self?.primaryReminder.message ?? "该喝水啦" },
+                getInterval: { [weak self] in Double(self?.primaryReminder.intervalMinutes ?? 0) },
                 getPaused: { [weak self] in self?.isPaused ?? false },
                 testFlight: { [weak self] in self?.showReminderNow() },
                 togglePause: { [weak self] in self?.togglePause() },
@@ -417,7 +528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func togglePause() {
         isPaused.toggle()
         UserDefaults.standard.set(isPaused, forKey: DefaultsKey.isPaused)
-        scheduleNextReminder(from: Date())
+        scheduleNextReminder()
     }
 
     @objc private func toggleSound() {
@@ -432,31 +543,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func editMessage() {
-        let field = NSTextField(string: message)
+        let current = primaryReminder
+        let field = NSTextField(string: current.message)
         field.placeholderString = "例如：起来喝口水"
         field.frame.size.width = 260
 
         let alert = NSAlert()
-        alert.messageText = "提醒文字"
-        alert.informativeText = "保持短一点，飞过屏幕时会更轻盈。"
+        alert.messageText = "默认提醒文字"
+        alert.informativeText = "会修改第一条提醒。保持短一点，飞过屏幕时会更轻盈。"
         alert.accessoryView = field
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
 
         if alert.runModal() == .alertFirstButtonReturn {
             let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            message = value.isEmpty ? "该喝水啦" : value
+            updatePrimaryReminder { reminder in
+                reminder.message = value.isEmpty ? "该喝水啦" : value
+            }
         }
     }
 
     @objc private func editInterval() {
-        let field = NSTextField(string: "\(Int(intervalMinutes))")
+        let current = primaryReminder
+        let field = NSTextField(string: "\(current.intervalMinutes ?? 45)")
         field.placeholderString = "分钟"
         field.frame.size.width = 120
 
         let alert = NSAlert()
-        alert.messageText = "提醒间隔"
-        alert.informativeText = "输入分钟数，适合低频提醒，比如 45 或 90。"
+        alert.messageText = "默认提醒间隔"
+        alert.informativeText = "会修改第一条提醒。输入分钟数，适合低频提醒，比如 45 或 90。"
         alert.accessoryView = field
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
@@ -464,19 +579,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertFirstButtonReturn,
            let value = Double(field.stringValue),
            value > 0 {
-            intervalMinutes = value
-            scheduleNextReminder(from: Date())
+            updatePrimaryReminder { reminder in
+                reminder.intervalMinutes = Int(value)
+                reminder.nextFireAt = Date().addingTimeInterval(value * 60)
+                reminder.isEnabled = true
+            }
         }
     }
 
     @objc private func editFlightRepeatCount() {
-        let field = NSTextField(string: "\(flightRepeatCount)")
+        let field = NSTextField(string: "\(primaryReminder.flightRepeatCount)")
         field.placeholderString = "次数"
         field.frame.size.width = 120
 
         let alert = NSAlert()
-        alert.messageText = "飞行次数"
-        alert.informativeText = "定时提醒触发后循环飞几次，中间间隔 2 秒。"
+        alert.messageText = "默认飞行次数"
+        alert.informativeText = "会修改第一条提醒。定时提醒触发后循环飞几次，中间间隔 2 秒。"
         alert.accessoryView = field
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
@@ -484,7 +602,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertFirstButtonReturn,
            let value = Int(field.stringValue),
            value > 0 {
-            flightRepeatCount = value
+            updatePrimaryReminder { reminder in
+                reminder.flightRepeatCount = max(1, min(12, value))
+            }
         }
     }
 
@@ -509,13 +629,178 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func selectPresetInterval(_ sender: NSMenuItem) {
         guard let minutes = sender.representedObject as? Int else { return }
-        intervalMinutes = Double(minutes)
-        scheduleNextReminder(from: Date())
+        updatePrimaryReminder { reminder in
+            reminder.intervalMinutes = minutes
+            reminder.nextFireAt = Date().addingTimeInterval(TimeInterval(minutes * 60))
+            reminder.isEnabled = true
+        }
+    }
+
+    private func updatePrimaryReminder(_ change: (inout ReminderItem) -> Void) {
+        if reminders.isEmpty {
+            reminders.append(primaryReminder)
+        }
+
+        change(&reminders[0])
+        saveReminders()
+        scheduleNextReminder()
+    }
+
+    private func rebuildRemindersMenu() {
+        let submenu = NSMenu()
+        if reminders.isEmpty {
+            submenu.addItem(NSMenuItem(title: "暂无提醒", action: nil, keyEquivalent: ""))
+        } else {
+            for reminder in reminders.sorted(by: { $0.nextFireAt < $1.nextFireAt }) {
+                let title = reminderSummary(reminder)
+                let testItem = makeMenuItem(title: "试飞：\(title)", action: #selector(testReminder(_:)), keyEquivalent: "")
+                testItem.representedObject = reminder.id
+                submenu.addItem(testItem)
+
+                let toggleTitle = reminder.isEnabled ? "停用：\(reminder.message)" : "启用：\(reminder.message)"
+                let toggleItem = makeMenuItem(title: toggleTitle, action: #selector(toggleReminder(_:)), keyEquivalent: "")
+                toggleItem.representedObject = reminder.id
+                submenu.addItem(toggleItem)
+
+                let deleteItem = makeMenuItem(title: "删除：\(reminder.message)", action: #selector(deleteReminder(_:)), keyEquivalent: "")
+                deleteItem.representedObject = reminder.id
+                submenu.addItem(deleteItem)
+                submenu.addItem(.separator())
+            }
+        }
+
+        submenu.addItem(makeMenuItem(title: "新建提醒...", action: #selector(addReminder), keyEquivalent: ""))
+        remindersMenuItem.submenu = submenu
+    }
+
+    private func reminderSummary(_ reminder: ReminderItem) -> String {
+        let mode = reminder.intervalMinutes.map { "每 \($0) 分钟" } ?? "一次"
+        let state = reminder.isEnabled ? "" : "已停用，"
+        return "\(state)\(reminder.message) · \(mode) · \(formatDate(reminder.nextFireAt)) · 飞 \(reminder.flightRepeatCount) 次"
+    }
+
+    private func formatDate(_ date: Date) -> String {
+        Self.reminderDateFormatter.string(from: date)
+    }
+
+    @objc private func addReminder() {
+        guard let reminder = presentReminderEditor() else { return }
+        reminders.append(reminder)
+        saveReminders()
+        scheduleNextReminder()
+    }
+
+    @objc private func testReminder(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let reminder = reminders.first(where: { $0.id == id }) else {
+            return
+        }
+
+        enqueueFlights([FlightJob(message: reminder.message, repetitions: reminder.flightRepeatCount)])
+    }
+
+    @objc private func toggleReminder(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let index = reminders.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+
+        reminders[index].isEnabled.toggle()
+        if reminders[index].isEnabled, reminders[index].nextFireAt < Date() {
+            if let minutes = reminders[index].intervalMinutes {
+                reminders[index].nextFireAt = Date().addingTimeInterval(TimeInterval(minutes * 60))
+            } else {
+                reminders[index].nextFireAt = Date().addingTimeInterval(60)
+            }
+        }
+        saveReminders()
+        scheduleNextReminder()
+    }
+
+    @objc private func deleteReminder(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        reminders.removeAll { $0.id == id }
+        if reminders.isEmpty {
+            reminders.append(primaryReminder)
+        }
+        saveReminders()
+        scheduleNextReminder()
+    }
+
+    private func presentReminderEditor() -> ReminderItem? {
+        let now = Date()
+        let messageField = NSTextField(string: "该喝水啦")
+        messageField.placeholderString = "提醒事项"
+
+        let dateField = NSTextField(string: Self.reminderDateFormatter.string(from: now.addingTimeInterval(3600)))
+        dateField.placeholderString = "yyyy-MM-dd HH:mm"
+
+        let repeatPopup = NSPopUpButton()
+        let repeatOptions = [
+            ("一次性提醒", 0),
+            ("每 10 分钟", 10),
+            ("每 20 分钟", 20),
+            ("每 30 分钟", 30),
+            ("每 40 分钟", 40),
+            ("每 50 分钟", 50),
+            ("每 60 分钟", 60)
+        ]
+        repeatOptions.forEach { title, minutes in
+            repeatPopup.addItem(withTitle: title)
+            repeatPopup.lastItem?.representedObject = minutes
+        }
+
+        let repeatCountField = NSTextField(string: "1")
+        repeatCountField.placeholderString = "1-12"
+
+        let form = NSGridView(views: [
+            [NSTextField(labelWithString: "提醒事项"), messageField],
+            [NSTextField(labelWithString: "首次时间"), dateField],
+            [NSTextField(labelWithString: "提醒方式"), repeatPopup],
+            [NSTextField(labelWithString: "飞行次数"), repeatCountField]
+        ])
+        form.columnSpacing = 12
+        form.rowSpacing = 10
+        form.column(at: 0).xPlacement = .trailing
+        form.column(at: 1).width = 220
+
+        let alert = NSAlert()
+        alert.messageText = "新建提醒"
+        alert.informativeText = "时间格式：yyyy-MM-dd HH:mm，例如 2026-06-04 18:30。"
+        alert.accessoryView = form
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+
+        let text = messageField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let date = Self.reminderDateFormatter.date(from: dateField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+            ?? now.addingTimeInterval(3600)
+        let minutes = repeatPopup.selectedItem?.representedObject as? Int ?? 0
+        let repeatCount = max(1, min(12, Int(repeatCountField.stringValue) ?? 1))
+
+        return ReminderItem(
+            id: UUID().uuidString,
+            message: text.isEmpty ? "该喝水啦" : text,
+            nextFireAt: date,
+            intervalMinutes: minutes == 0 ? nil : minutes,
+            flightRepeatCount: repeatCount,
+            isEnabled: true
+        )
     }
 
     @objc private func quit() {
         NSApp.terminate(nil)
     }
+
+    private static let reminderDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter
+    }()
 }
 
 final class FlightWindow: NSWindow {
@@ -596,7 +881,7 @@ final class FlightWindow: NSWindow {
         let progress = min(1, elapsed / animationDuration)
         let eased = smoothstep(progress)
         let x = animationStartX + (animationEndX - animationStartX) * eased
-        let lift = sin(progress * .pi * 2.0) * 12 + sin(progress * .pi * 5.0 + 0.45) * 3
+        let lift = sin(progress * .pi * 2.0) * 13 + sin(progress * .pi * 4.6 + 0.45) * 4
         if let screenFrame = NSScreen.main?.frame {
             flightView.updateOcclusionMask(excluding: topmostUserWindowRects(in: screenFrame))
         }
@@ -857,7 +1142,8 @@ final class ControlPanel: NSObject {
 
     private func update() {
         messageLabel.stringValue = getMessage()
-        intervalLabel.stringValue = "每 \(Int(getInterval())) 分钟提醒一次"
+        let interval = Int(getInterval())
+        intervalLabel.stringValue = interval > 0 ? "每 \(interval) 分钟提醒一次" : "一次性提醒"
         pauseButton.title = getPaused() ? "继续提醒" : "暂停提醒"
     }
 
@@ -961,20 +1247,20 @@ final class FlightView: NSView {
         CATransaction.setDisableActions(true)
 
         let flutter = sin(flightOrigin.x / 82) * 4.5
-        let formationBob = sin(flightOrigin.x / 46) * 3.2 + sin(flightOrigin.x / 119) * 1.4
-        let bannerFrame = CGRect(x: flightOrigin.x, y: flightOrigin.y + 22 + formationBob, width: bannerWidth, height: 38)
+        let formationBob = sin(flightOrigin.x / 46) * 3.4 + sin(flightOrigin.x / 119) * 1.8
+        let bannerFrame = CGRect(x: flightOrigin.x, y: flightOrigin.y + 12 + formationBob, width: bannerWidth, height: 40)
         bannerLayer.frame = bannerFrame
         bannerLayer.path = flagPath(in: CGRect(origin: .zero, size: bannerFrame.size), wave: flutter).cgPath
         flagHighlightLayer.frame = bannerFrame
         flagHighlightLayer.path = flagHighlightPath(in: CGRect(origin: .zero, size: bannerFrame.size)).cgPath
 
-        textLayer.frame = bannerFrame.insetBy(dx: 16, dy: 11)
+        textLayer.frame = bannerFrame.insetBy(dx: 17, dy: 12)
 
         let planeFrame = CGRect(x: bannerFrame.maxX + 9, y: flightOrigin.y + 4 + formationBob, width: 154, height: 79)
         flightHitFrame = bannerFrame.union(planeFrame)
         ropeLayer.frame = bounds
-        let tailAnchor = CGPoint(x: planeFrame.minX + 14, y: planeFrame.minY + 37)
-        ropeLayer.path = ropePath(from: CGPoint(x: bannerFrame.maxX - 1, y: bannerFrame.midY - 1), to: tailAnchor).cgPath
+        let tailAnchor = CGPoint(x: planeFrame.minX + 14, y: planeFrame.minY + 36)
+        ropeLayer.path = ropePath(from: CGPoint(x: bannerFrame.maxX - 1, y: bannerFrame.midY), to: tailAnchor).cgPath
         tailHookLayer.frame = CGRect(x: tailAnchor.x - 2.5, y: tailAnchor.y - 2.5, width: 5, height: 5)
         tailHookLayer.path = NSBezierPath(ovalIn: tailHookLayer.bounds).cgPath
 
@@ -1000,7 +1286,7 @@ final class FlightView: NSView {
         wingLayer.opacity = Float(flightOpacity)
         planeLayer.opacity = Float(flightOpacity)
         bellyAccentLayer.opacity = Float(flightOpacity * 0.85)
-        tailHookLayer.opacity = Float(flightOpacity)
+        tailHookLayer.opacity = 0
         windowLayer.opacity = Float(flightOpacity)
 
         CATransaction.commit()
@@ -1069,7 +1355,6 @@ final class FlightView: NSView {
         layer?.addSublayer(wingLayer)
         layer?.addSublayer(planeLayer)
         layer?.addSublayer(bellyAccentLayer)
-        layer?.addSublayer(tailHookLayer)
         layer?.addSublayer(windowLayer)
 
         // The whole flight assembly already rises and falls together in FlightWindow.

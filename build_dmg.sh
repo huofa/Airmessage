@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Airmessage"
-VERSION="0.1.6"
+VERSION="0.1.7"
 VOLUME_NAME="${APP_NAME} ${VERSION}"
 BUILD_DIR=".build"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
