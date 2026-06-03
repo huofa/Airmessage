@@ -18,6 +18,15 @@ chmod +x build_app.sh
 open .build/Airmessage.app
 ```
 
+## 打包成拖动安装 `.dmg`
+
+```bash
+chmod +x build_dmg.sh
+./build_dmg.sh
+```
+
+生成的 `Airmessage-0.1.1.dmg` 打开后，把 `Airmessage.app` 拖到 `Applications` 即可。
+
 ## 功能
 
 - 菜单栏常驻，不占 Dock。
