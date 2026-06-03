@@ -10,7 +10,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Airmessage",
-            path: "Sources/Airmessage"
+            path: "Sources/Airmessage",
+            exclude: [
+                "Resources"
+            ]
         )
     ]
 )

@@ -9,7 +9,9 @@ swift build -c release
 
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
+mkdir -p "$APP_DIR/Contents/Resources"
 cp "$BIN" "$APP_DIR/Contents/MacOS/$APP_NAME"
+cp Sources/Airmessage/Resources/flyby.wav "$APP_DIR/Contents/Resources/flyby.wav"
 
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
