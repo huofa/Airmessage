@@ -729,13 +729,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func presentReminderEditor() -> ReminderItem? {
         let now = Date()
+        let labelWidth: CGFloat = 72
+        let fieldX: CGFloat = 92
+        let fieldWidth: CGFloat = 238
+        let rowHeight: CGFloat = 28
+        let form = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 152))
+
         let messageField = NSTextField(string: "该喝水啦")
         messageField.placeholderString = "提醒事项"
+        messageField.frame = NSRect(x: fieldX, y: 120, width: fieldWidth, height: rowHeight)
 
         let dateField = NSTextField(string: Self.reminderDateFormatter.string(from: now.addingTimeInterval(3600)))
         dateField.placeholderString = "yyyy-MM-dd HH:mm"
+        dateField.frame = NSRect(x: fieldX, y: 82, width: fieldWidth, height: rowHeight)
 
         let repeatPopup = NSPopUpButton()
+        repeatPopup.frame = NSRect(x: fieldX, y: 44, width: fieldWidth, height: rowHeight)
         let repeatOptions = [
             ("一次性提醒", 0),
             ("每 10 分钟", 10),
@@ -752,17 +761,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let repeatCountField = NSTextField(string: "1")
         repeatCountField.placeholderString = "1-12"
+        repeatCountField.frame = NSRect(x: fieldX, y: 6, width: 80, height: rowHeight)
 
-        let form = NSGridView(views: [
-            [NSTextField(labelWithString: "提醒事项"), messageField],
-            [NSTextField(labelWithString: "首次时间"), dateField],
-            [NSTextField(labelWithString: "提醒方式"), repeatPopup],
-            [NSTextField(labelWithString: "飞行次数"), repeatCountField]
-        ])
-        form.columnSpacing = 12
-        form.rowSpacing = 10
-        form.column(at: 0).xPlacement = .trailing
-        form.column(at: 1).width = 220
+        [
+            ("提醒事项", 120),
+            ("首次时间", 82),
+            ("提醒方式", 44),
+            ("飞行次数", 6)
+        ].forEach { title, y in
+            let label = NSTextField(labelWithString: title)
+            label.alignment = .right
+            label.frame = NSRect(x: 0, y: CGFloat(y) + 5, width: labelWidth, height: 18)
+            form.addSubview(label)
+        }
+
+        form.addSubview(messageField)
+        form.addSubview(dateField)
+        form.addSubview(repeatPopup)
+        form.addSubview(repeatCountField)
 
         let alert = NSAlert()
         alert.messageText = "新建提醒"
@@ -1362,18 +1378,17 @@ final class FlightView: NSView {
     }
 
     private func flagPath(in rect: CGRect, wave: CGFloat) -> NSBezierPath {
-        let wave = wave * 0.25
-        let r = rect.insetBy(dx: 1.0, dy: 2.0)
+        let wave = wave * 0.16
+        let r = rect.insetBy(dx: 1.0, dy: 2.5)
         let path = NSBezierPath()
-        path.move(to: CGPoint(x: r.minX + 18, y: r.midY - 2))
-        path.curve(to: CGPoint(x: r.minX + 34, y: r.maxY - 3), controlPoint1: CGPoint(x: r.minX + 9, y: r.midY + 6), controlPoint2: CGPoint(x: r.minX + 18, y: r.maxY - 1))
-        path.curve(to: CGPoint(x: r.midX - 10, y: r.maxY - 2 + wave), controlPoint1: CGPoint(x: r.minX + 48, y: r.maxY + 5), controlPoint2: CGPoint(x: r.midX - 34, y: r.maxY - 4))
-        path.curve(to: CGPoint(x: r.maxX - 32, y: r.maxY - 4), controlPoint1: CGPoint(x: r.midX + 16, y: r.maxY + 5), controlPoint2: CGPoint(x: r.maxX - 52, y: r.maxY + 2))
-        path.curve(to: CGPoint(x: r.maxX - 5, y: r.midY + 1), controlPoint1: CGPoint(x: r.maxX - 14, y: r.maxY - 8), controlPoint2: CGPoint(x: r.maxX - 5, y: r.maxY - 2))
-        path.curve(to: CGPoint(x: r.maxX - 30, y: r.minY + 4), controlPoint1: CGPoint(x: r.maxX + 3, y: r.minY + 12), controlPoint2: CGPoint(x: r.maxX - 10, y: r.minY + 2))
-        path.curve(to: CGPoint(x: r.midX + 5, y: r.minY + 3 - wave), controlPoint1: CGPoint(x: r.maxX - 48, y: r.minY - 2), controlPoint2: CGPoint(x: r.midX + 34, y: r.minY + 1))
-        path.curve(to: CGPoint(x: r.minX + 28, y: r.minY + 5), controlPoint1: CGPoint(x: r.midX - 24, y: r.minY - 3), controlPoint2: CGPoint(x: r.minX + 48, y: r.minY))
-        path.curve(to: CGPoint(x: r.minX + 18, y: r.midY - 2), controlPoint1: CGPoint(x: r.minX + 10, y: r.minY + 8), controlPoint2: CGPoint(x: r.minX + 7, y: r.midY - 9))
+        let radius = r.height / 2
+        path.move(to: CGPoint(x: r.minX + radius, y: r.minY))
+        path.curve(to: CGPoint(x: r.maxX - radius, y: r.minY + wave), controlPoint1: CGPoint(x: r.midX - 34, y: r.minY - 1.8), controlPoint2: CGPoint(x: r.midX + 36, y: r.minY + 2.0))
+        path.curve(to: CGPoint(x: r.maxX, y: r.midY), controlPoint1: CGPoint(x: r.maxX - 6, y: r.minY + 1), controlPoint2: CGPoint(x: r.maxX, y: r.minY + 7))
+        path.curve(to: CGPoint(x: r.maxX - radius, y: r.maxY - wave), controlPoint1: CGPoint(x: r.maxX, y: r.maxY - 7), controlPoint2: CGPoint(x: r.maxX - 6, y: r.maxY - 1))
+        path.curve(to: CGPoint(x: r.minX + radius, y: r.maxY), controlPoint1: CGPoint(x: r.midX + 34, y: r.maxY + 1.8), controlPoint2: CGPoint(x: r.midX - 36, y: r.maxY - 2.0))
+        path.curve(to: CGPoint(x: r.minX, y: r.midY), controlPoint1: CGPoint(x: r.minX + 6, y: r.maxY - 1), controlPoint2: CGPoint(x: r.minX, y: r.maxY - 7))
+        path.curve(to: CGPoint(x: r.minX + radius, y: r.minY), controlPoint1: CGPoint(x: r.minX, y: r.minY + 7), controlPoint2: CGPoint(x: r.minX + 6, y: r.minY + 1))
         path.close()
         return path
     }

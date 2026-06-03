@@ -1,6 +1,6 @@
 # Airmessage
 
-Version: `0.1.7`
+Version: `0.1.8`
 
 一个极简 macOS 菜单栏小工具：到点时从桌面飞过一架小飞机，带一条低频消息提醒。
 
@@ -25,7 +25,7 @@ chmod +x build_dmg.sh
 ./build_dmg.sh
 ```
 
-生成的 `Airmessage-0.1.7.dmg` 打开后，把 `Airmessage.app` 拖到 `Applications` 即可。
+生成的 `Airmessage-0.1.8.dmg` 打开后，把 `Airmessage.app` 拖到 `Applications` 即可。
 
 ## 功能
 

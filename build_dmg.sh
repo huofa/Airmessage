@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Airmessage"
-VERSION="0.1.7"
+VERSION="0.1.8"
 VOLUME_NAME="${APP_NAME} ${VERSION}"
 BUILD_DIR=".build"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
@@ -31,5 +31,19 @@ hdiutil convert "$RW_DMG" \
   -o "$FINAL_DMG" >/dev/null
 
 rm -f "$RW_DMG"
+
+cat > "${BUILD_DIR}/set_dmg_icon.swift" <<'SWIFT'
+import AppKit
+
+let arguments = CommandLine.arguments
+guard arguments.count == 3,
+      let icon = NSImage(contentsOfFile: arguments[2]) else {
+    exit(0)
+}
+
+NSWorkspace.shared.setIcon(icon, forFile: arguments[1], options: [])
+SWIFT
+
+swift "${BUILD_DIR}/set_dmg_icon.swift" "$FINAL_DMG" "Sources/Airmessage/Resources/app_icon_source.png" >/dev/null 2>&1 || true
 
 echo "$FINAL_DMG"
