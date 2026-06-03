@@ -6,6 +6,8 @@ private enum DefaultsKey {
     static let intervalMinutes = "intervalMinutes"
     static let isPaused = "isPaused"
     static let playSound = "playSound"
+    static let flightRepeatCount = "flightRepeatCount"
+    static let flightDurationSeconds = "flightDurationSeconds"
 }
 
 @MainActor
@@ -17,7 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let soundItem = NSMenuItem(title: "", action: #selector(toggleSound), keyEquivalent: "")
     private var controlPanel: ControlPanel?
     private var flightWindow: FlightWindow?
+    private var flightSequenceTask: Task<Void, Never>?
     private var flybyPlayer: AVAudioPlayer?
+    private var globalKeyMonitor: Any?
+    private var localKeyMonitor: Any?
     private var reminderTimer: Timer?
     private var clockTimer: Timer?
     private var nextReminderDate = Date()
@@ -55,15 +60,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private var flightRepeatCount: Int {
+        get {
+            let saved = UserDefaults.standard.integer(forKey: DefaultsKey.flightRepeatCount)
+            return saved > 0 ? saved : 1
+        }
+        set {
+            UserDefaults.standard.set(max(1, min(12, newValue)), forKey: DefaultsKey.flightRepeatCount)
+        }
+    }
+
+    private var flightDurationSeconds: Double {
+        get {
+            let saved = UserDefaults.standard.double(forKey: DefaultsKey.flightDurationSeconds)
+            return saved > 0 ? saved : 12
+        }
+        set {
+            UserDefaults.standard.set(max(4, min(45, newValue)), forKey: DefaultsKey.flightDurationSeconds)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         ProcessInfo.processInfo.disableAutomaticTermination("Airmessage keeps reminder timers running.")
         NSApp.setActivationPolicy(.regular)
         setupMenu()
         scheduleNextReminder(from: Date())
         startClock()
+        startShortcutMonitoring()
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(600))
-            showFlight(message: message)
+            showFlight(message: message, repetitions: 1)
         }
     }
 
@@ -81,11 +107,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(nextItem)
         menu.addItem(makeMenuItem(title: "打开控制面板", action: #selector(showControlPanel), keyEquivalent: "o"))
-        menu.addItem(makeMenuItem(title: "现在试飞", action: #selector(showReminderNow), keyEquivalent: "r"))
+        menu.addItem(makeMenuItem(title: "现在试飞", action: #selector(showReminderNow), keyEquivalent: "0"))
         menu.addItem(pauseItem)
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "修改提醒文字...", action: #selector(editMessage), keyEquivalent: "m"))
         menu.addItem(makeMenuItem(title: "自定义间隔...", action: #selector(editInterval), keyEquivalent: "i"))
+        menu.addItem(makeMenuItem(title: "飞行次数...", action: #selector(editFlightRepeatCount), keyEquivalent: ""))
+        menu.addItem(makeMenuItem(title: "飞行时长...", action: #selector(editFlightDuration), keyEquivalent: ""))
 
         let presets = NSMenu()
         [15, 30, 45, 60, 90, 120].forEach { minutes in
@@ -120,6 +148,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func startShortcutMonitoring() {
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  event.charactersIgnoringModifiers == "0" else {
+                return
+            }
+
+            Task { @MainActor in
+                self?.showReminderNow()
+            }
+        }
+
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  event.charactersIgnoringModifiers == "0" else {
+                return event
+            }
+
+            self?.showReminderNow()
+            return nil
+        }
+    }
+
     private func scheduleNextReminder(from date: Date) {
         reminderTimer?.invalidate()
         nextReminderDate = date.addingTimeInterval(intervalMinutes * 60)
@@ -138,38 +189,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func fireReminder() {
-        showFlight(message: message)
+        showFlight(message: message, repetitions: flightRepeatCount)
         scheduleNextReminder(from: Date())
     }
 
-    private func showFlight(message: String) {
-        if playSound {
-            playFlybySound()
-        }
+    private func showFlight(message: String, repetitions: Int) {
+        flightSequenceTask?.cancel()
+        flightSequenceTask = Task { @MainActor in
+            let count = max(1, repetitions)
+            for index in 0..<count {
+                if Task.isCancelled { return }
 
-        if flightWindow == nil {
-            flightWindow = FlightWindow(message: message)
-        } else {
-            flightWindow?.setMessage(message)
-        }
+                if playSound {
+                    playFlybySound()
+                }
 
-        flightWindow?.fly {}
+                if flightWindow == nil {
+                    flightWindow = FlightWindow(message: message)
+                } else {
+                    flightWindow?.setMessage(message)
+                }
+
+                await withCheckedContinuation { continuation in
+                    flightWindow?.fly(duration: flightDurationSeconds) {
+                        continuation.resume()
+                    }
+                }
+
+                if Task.isCancelled { return }
+
+                if index < count - 1 {
+                    try? await Task.sleep(for: .seconds(2))
+                }
+            }
+        }
     }
 
     private func playFlybySound() {
-        guard let url = Bundle.main.url(forResource: "flyby", withExtension: "wav") else {
+        guard let url = flybySoundURL() else {
             NSSound(named: NSSound.Name("Submarine"))?.play()
             return
         }
 
         do {
             flybyPlayer = try AVAudioPlayer(contentsOf: url)
-            flybyPlayer?.volume = 0.34
+            flybyPlayer?.volume = 0.62
             flybyPlayer?.prepareToPlay()
             flybyPlayer?.play()
         } catch {
             NSSound(named: NSSound.Name("Submarine"))?.play()
         }
+    }
+
+    private func flybySoundURL() -> URL? {
+        if let url = Bundle.main.url(forResource: "flyby", withExtension: "wav") {
+            return url
+        }
+
+        let executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        let resourceURL = executableURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/flyby.wav")
+        return FileManager.default.fileExists(atPath: resourceURL.path) ? resourceURL : nil
     }
 
     private func updateMenu() {
@@ -191,7 +273,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showReminderNow() {
-        showFlight(message: message)
+        showFlight(message: message, repetitions: flightRepeatCount)
     }
 
     @objc private func showControlPanel() {
@@ -261,6 +343,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func editFlightRepeatCount() {
+        let field = NSTextField(string: "\(flightRepeatCount)")
+        field.placeholderString = "次数"
+        field.frame.size.width = 120
+
+        let alert = NSAlert()
+        alert.messageText = "飞行次数"
+        alert.informativeText = "定时提醒触发后循环飞几次，中间间隔 2 秒。"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+
+        if alert.runModal() == .alertFirstButtonReturn,
+           let value = Int(field.stringValue),
+           value > 0 {
+            flightRepeatCount = value
+        }
+    }
+
+    @objc private func editFlightDuration() {
+        let field = NSTextField(string: "\(Int(flightDurationSeconds))")
+        field.placeholderString = "秒"
+        field.frame.size.width = 120
+
+        let alert = NSAlert()
+        alert.messageText = "飞行时长"
+        alert.informativeText = "输入每次飞过桌面的秒数，数值越大速度越慢。"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+
+        if alert.runModal() == .alertFirstButtonReturn,
+           let value = Double(field.stringValue),
+           value > 0 {
+            flightDurationSeconds = value
+        }
+    }
+
     @objc private func selectPresetInterval(_ sender: NSMenuItem) {
         guard let minutes = sender.representedObject as? Int else { return }
         intervalMinutes = Double(minutes)
@@ -275,12 +395,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 final class FlightWindow: NSWindow {
     private let flightView: FlightView
     private var animationTimer: Timer?
+    private var mouseMonitor: Any?
     private var animationStartedAt = Date()
     private var animationDuration: TimeInterval = 12.0
     private var animationStartX: CGFloat = 0
     private var animationEndX: CGFloat = 0
     private var animationY: CGFloat = 0
     private var animationCompletion: (@MainActor () -> Void)?
+    private var isDraggingFlight = false
+    private var dragOffset = CGPoint.zero
+    private var currentFlightX: CGFloat = 0
+    private var currentFlightY: CGFloat = 0
     private let contentWidth: CGFloat
 
     init(message: String) {
@@ -300,25 +425,29 @@ final class FlightWindow: NSWindow {
         hasShadow = false
         ignoresMouseEvents = true
         alphaValue = 1
-        level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.normalWindow)) - 1)
+        level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.normalWindow)) + 1)
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         contentView = flightView
+        startMouseMonitoring()
     }
 
-    func fly(completion: @MainActor @escaping () -> Void) {
+    func fly(duration: TimeInterval, completion: @MainActor @escaping () -> Void) {
         guard let screenFrame = NSScreen.main?.frame else {
             completion()
             return
         }
 
         animationTimer?.invalidate()
+        isDraggingFlight = false
 
         animationStartedAt = Date()
+        animationDuration = max(4, min(45, duration))
         animationStartX = -320
         animationEndX = screenFrame.width + 48
         animationY = screenFrame.height * 0.60
         animationCompletion = completion
-        flightView.setFlightPosition(x: animationStartX, y: animationY, opacity: 0)
+        flightView.updateOcclusionMask(excluding: topmostUserWindowRects(in: screenFrame))
+        setFlightPosition(x: animationStartX, y: animationY, opacity: 0)
         displayIfNeeded()
         orderFrontRegardless()
         animationTimer = Timer.scheduledTimer(
@@ -335,20 +464,88 @@ final class FlightWindow: NSWindow {
     }
 
     @objc private func stepFlightAnimation() {
+        guard !isDraggingFlight else { return }
+
         let elapsed = Date().timeIntervalSince(animationStartedAt)
         let progress = min(1, elapsed / animationDuration)
         let eased = smoothstep(progress)
         let x = animationStartX + (animationEndX - animationStartX) * eased
         let lift = sin(progress * .pi * 2.0) * 8
-        flightView.setFlightPosition(x: x, y: animationY + lift, opacity: opacity(for: progress))
+        if let screenFrame = NSScreen.main?.frame {
+            flightView.updateOcclusionMask(excluding: topmostUserWindowRects(in: screenFrame))
+        }
+        setFlightPosition(x: x, y: animationY + lift, opacity: opacity(for: progress))
 
         if progress >= 1 {
             animationTimer?.invalidate()
             animationTimer = nil
-            flightView.setFlightPosition(x: animationEndX, y: animationY, opacity: 0)
+            setFlightPosition(x: animationEndX, y: animationY, opacity: 0)
             let completion = animationCompletion
             animationCompletion = nil
             completion?()
+        }
+    }
+
+    private func setFlightPosition(x: CGFloat, y: CGFloat, opacity: CGFloat) {
+        currentFlightX = x
+        currentFlightY = y
+        flightView.setFlightPosition(x: x, y: y, opacity: opacity)
+    }
+
+    private func startMouseMonitoring() {
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            Task { @MainActor in
+                self?.handleMouseEvent(event)
+            }
+        }
+    }
+
+    private func handleMouseEvent(_ event: NSEvent) {
+        guard flightView.currentOpacity > 0.05 else { return }
+
+        let location = event.locationInWindow
+        let screenPoint = event.window == nil ? NSEvent.mouseLocation : convertPoint(toScreen: location)
+        let localPoint = CGPoint(x: screenPoint.x - frame.minX, y: screenPoint.y - frame.minY)
+
+        switch event.type {
+        case .leftMouseDown:
+            guard flightView.flightHitFrame.insetBy(dx: -18, dy: -18).contains(localPoint) else { return }
+            isDraggingFlight = true
+            dragOffset = CGPoint(x: localPoint.x - currentFlightX, y: localPoint.y - currentFlightY)
+        case .leftMouseDragged:
+            guard isDraggingFlight else { return }
+            let x = localPoint.x - dragOffset.x
+            let y = localPoint.y - dragOffset.y
+            setFlightPosition(x: x, y: y, opacity: 1)
+        case .leftMouseUp:
+            guard isDraggingFlight else { return }
+            isDraggingFlight = false
+            resumeFlightFromCurrentPosition()
+        default:
+            break
+        }
+    }
+
+    private func resumeFlightFromCurrentPosition() {
+        guard let screenFrame = NSScreen.main?.frame else { return }
+
+        animationStartX = currentFlightX
+        animationEndX = screenFrame.width + 48
+        animationY = currentFlightY
+        animationStartedAt = Date()
+
+        let remainingDistance = max(1, animationEndX - animationStartX)
+        let fullDistance = max(1, screenFrame.width + 48 - (-320))
+        animationDuration = max(1.2, animationDuration * Double(remainingDistance / fullDistance))
+
+        if animationTimer == nil {
+            animationTimer = Timer.scheduledTimer(
+                timeInterval: 1.0 / 60.0,
+                target: self,
+                selector: #selector(stepFlightAnimation),
+                userInfo: nil,
+                repeats: true
+            )
         }
     }
 
@@ -360,6 +557,54 @@ final class FlightWindow: NSWindow {
         let fadeIn = min(1, progress / 0.12)
         let fadeOut = min(1, (1 - progress) / 0.16)
         return CGFloat(max(0, min(fadeIn, fadeOut)))
+    }
+
+    private func topmostUserWindowRects(in screenFrame: CGRect) -> [CGRect] {
+        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        var targetPID: pid_t?
+        var rects: [CGRect] = []
+
+        for window in windows {
+            guard let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
+                  ownerPID != currentPID,
+                  let layer = window[kCGWindowLayer as String] as? Int,
+                  layer == 0,
+                  let alpha = window[kCGWindowAlpha as String] as? Double,
+                  alpha > 0.05,
+                  let bounds = window[kCGWindowBounds as String] as? [String: Any],
+                  let rect = windowRect(from: bounds, screenFrame: screenFrame),
+                  rect.width > 180,
+                  rect.height > 120 else {
+                continue
+            }
+
+            if targetPID == nil {
+                targetPID = ownerPID
+            }
+
+            guard ownerPID == targetPID else {
+                break
+            }
+
+            rects.append(rect)
+        }
+
+        return rects
+    }
+
+    private func windowRect(from bounds: [String: Any], screenFrame: CGRect) -> CGRect? {
+        guard let x = bounds["X"] as? CGFloat,
+              let yFromTop = bounds["Y"] as? CGFloat,
+              let width = bounds["Width"] as? CGFloat,
+              let height = bounds["Height"] as? CGFloat else {
+            return nil
+        }
+
+        return CGRect(x: x, y: screenFrame.height - yFromTop - height, width: width, height: height)
     }
 }
 
@@ -518,9 +763,14 @@ final class FlightView: NSView {
     private let wingLayer = CAShapeLayer()
     private let tailLayer = CAShapeLayer()
     private let windowLayer = CAShapeLayer()
+    private let visibilityMaskLayer = CAShapeLayer()
     private var flightOrigin = CGPoint(x: 0, y: 0)
     private var flightOpacity: CGFloat = 1
-    private var bannerWidth: CGFloat = 180
+    private var bannerWidth: CGFloat = 132
+    private(set) var flightHitFrame = CGRect.zero
+    var currentOpacity: CGFloat {
+        flightOpacity
+    }
 
     init(message: String, maxFlightWidth: CGFloat) {
         self.message = message
@@ -529,6 +779,7 @@ final class FlightView: NSView {
         wantsLayer = true
         layer?.masksToBounds = false
         setupLayers()
+        layer?.mask = visibilityMaskLayer
     }
 
     required init?(coder: NSCoder) {
@@ -537,7 +788,7 @@ final class FlightView: NSView {
 
     override func layout() {
         super.layout()
-        bannerWidth = min(maxFlightWidth - 122, max(180, CGFloat(message.count) * 18 + 56))
+        bannerWidth = min(maxFlightWidth - 122, max(112, CGFloat(message.count) * 12 + 40))
         positionLayers()
     }
 
@@ -553,19 +804,37 @@ final class FlightView: NSView {
         needsLayout = true
     }
 
+    func updateOcclusionMask(excluding rects: [CGRect]) {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        let path = CGMutablePath()
+        path.addRect(bounds)
+        rects.forEach { path.addRect($0.insetBy(dx: -8, dy: -8)) }
+        visibilityMaskLayer.frame = bounds
+        visibilityMaskLayer.fillRule = .evenOdd
+        visibilityMaskLayer.path = path
+
+        CATransaction.commit()
+    }
+
     private func positionLayers() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
-        let bannerFrame = CGRect(x: flightOrigin.x, y: flightOrigin.y + 18, width: bannerWidth, height: 50)
+        let flutter = sin(flightOrigin.x / 82) * 4
+        let bannerFrame = CGRect(x: flightOrigin.x, y: flightOrigin.y + 24 + flutter * 0.35, width: bannerWidth, height: 32)
         bannerLayer.frame = bannerFrame
-        bannerLayer.path = flagPath(in: CGRect(origin: .zero, size: bannerFrame.size), wave: sin(flightOrigin.x / 90) * 2.5).cgPath
+        bannerLayer.path = flagPath(in: CGRect(origin: .zero, size: bannerFrame.size), wave: flutter).cgPath
         flagHighlightLayer.frame = bannerFrame
         flagHighlightLayer.path = flagHighlightPath(in: CGRect(origin: .zero, size: bannerFrame.size)).cgPath
 
-        textLayer.frame = bannerFrame.insetBy(dx: 20, dy: 13)
+        textLayer.frame = bannerFrame.insetBy(dx: 14, dy: 8)
 
         let planeFrame = CGRect(x: bannerFrame.maxX + 20, y: flightOrigin.y + 4, width: 126, height: 78)
+        flightHitFrame = bannerFrame.union(planeFrame)
         ropeLayer.frame = bounds
         ropeLayer.path = ropePath(from: CGPoint(x: bannerFrame.maxX - 4, y: bannerFrame.midY), to: CGPoint(x: planeFrame.minX + 8, y: planeFrame.midY - 1)).cgPath
 
@@ -591,13 +860,13 @@ final class FlightView: NSView {
     }
 
     private func setupLayers() {
-        bannerLayer.fillColor = NSColor(calibratedRed: 0.30, green: 0.58, blue: 0.66, alpha: 0.92).cgColor
+        bannerLayer.fillColor = NSColor(calibratedRed: 0.34, green: 0.74, blue: 0.82, alpha: 0.88).cgColor
         bannerLayer.shadowColor = NSColor.black.cgColor
-        bannerLayer.shadowOpacity = 0.20
-        bannerLayer.shadowRadius = 12
-        bannerLayer.shadowOffset = CGSize(width: 0, height: -4)
+        bannerLayer.shadowOpacity = 0.15
+        bannerLayer.shadowRadius = 10
+        bannerLayer.shadowOffset = CGSize(width: 0, height: -3)
 
-        flagHighlightLayer.fillColor = NSColor(calibratedWhite: 1, alpha: 0.16).cgColor
+        flagHighlightLayer.fillColor = NSColor(calibratedWhite: 1, alpha: 0.18).cgColor
         ropeLayer.fillColor = nil
         ropeLayer.strokeColor = NSColor(calibratedRed: 0.64, green: 0.76, blue: 0.79, alpha: 0.86).cgColor
         ropeLayer.lineWidth = 1.5
@@ -605,8 +874,8 @@ final class FlightView: NSView {
 
         textLayer.string = message
         textLayer.foregroundColor = NSColor.white.cgColor
-        textLayer.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
-        textLayer.fontSize = 17
+        textLayer.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        textLayer.fontSize = 13
         textLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
         textLayer.truncationMode = .end
         textLayer.alignmentMode = .center
@@ -649,25 +918,37 @@ final class FlightView: NSView {
         wingLayer.add(bob, forKey: "bob")
         tailLayer.add(bob, forKey: "bob")
         windowLayer.add(bob, forKey: "bob")
+
+        let flagDrift = CABasicAnimation(keyPath: "transform.translation.y")
+        flagDrift.fromValue = -2
+        flagDrift.toValue = 3
+        flagDrift.duration = 1.35
+        flagDrift.autoreverses = true
+        flagDrift.repeatCount = .infinity
+        flagDrift.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        bannerLayer.add(flagDrift, forKey: "flagDrift")
+        flagHighlightLayer.add(flagDrift, forKey: "flagDrift")
+        textLayer.add(flagDrift, forKey: "flagDrift")
     }
 
     private func flagPath(in rect: CGRect, wave: CGFloat) -> NSBezierPath {
+        let wave = wave * 0.55
         let path = NSBezierPath()
-        path.move(to: CGPoint(x: rect.minX + 12, y: rect.minY + 2))
-        path.curve(to: CGPoint(x: rect.maxX - 6, y: rect.minY + 8 + wave), controlPoint1: CGPoint(x: rect.width * 0.32, y: rect.minY - 5), controlPoint2: CGPoint(x: rect.width * 0.68, y: rect.minY + 12))
-        path.curve(to: CGPoint(x: rect.maxX - 12, y: rect.maxY - 7 - wave), controlPoint1: CGPoint(x: rect.maxX + 6, y: rect.midY + 6), controlPoint2: CGPoint(x: rect.maxX - 2, y: rect.maxY - 4))
-        path.curve(to: CGPoint(x: rect.minX + 10, y: rect.maxY - 3), controlPoint1: CGPoint(x: rect.width * 0.68, y: rect.maxY - 15), controlPoint2: CGPoint(x: rect.width * 0.28, y: rect.maxY + 6))
-        path.curve(to: CGPoint(x: rect.minX + 12, y: rect.minY + 2), controlPoint1: CGPoint(x: rect.minX - 3, y: rect.maxY - 12), controlPoint2: CGPoint(x: rect.minX - 2, y: rect.minY + 12))
+        path.move(to: CGPoint(x: rect.minX + 10, y: rect.minY + 2))
+        path.curve(to: CGPoint(x: rect.maxX - 7, y: rect.minY + 6 + wave), controlPoint1: CGPoint(x: rect.width * 0.32, y: rect.minY - 3), controlPoint2: CGPoint(x: rect.width * 0.70, y: rect.minY + 8))
+        path.curve(to: CGPoint(x: rect.maxX - 10, y: rect.maxY - 6 - wave), controlPoint1: CGPoint(x: rect.maxX + 4, y: rect.midY + 4), controlPoint2: CGPoint(x: rect.maxX - 2, y: rect.maxY - 3))
+        path.curve(to: CGPoint(x: rect.minX + 9, y: rect.maxY - 2), controlPoint1: CGPoint(x: rect.width * 0.68, y: rect.maxY - 10), controlPoint2: CGPoint(x: rect.width * 0.28, y: rect.maxY + 4))
+        path.curve(to: CGPoint(x: rect.minX + 10, y: rect.minY + 2), controlPoint1: CGPoint(x: rect.minX - 2, y: rect.maxY - 8), controlPoint2: CGPoint(x: rect.minX - 1, y: rect.minY + 8))
         path.close()
         return path
     }
 
     private func flagHighlightPath(in rect: CGRect) -> NSBezierPath {
         let path = NSBezierPath()
-        path.move(to: CGPoint(x: rect.minX + 18, y: rect.maxY - 13))
-        path.curve(to: CGPoint(x: rect.maxX - 22, y: rect.maxY - 14), controlPoint1: CGPoint(x: rect.width * 0.36, y: rect.maxY - 4), controlPoint2: CGPoint(x: rect.width * 0.65, y: rect.maxY - 21))
-        path.curve(to: CGPoint(x: rect.maxX - 38, y: rect.maxY - 22), controlPoint1: CGPoint(x: rect.maxX - 26, y: rect.maxY - 19), controlPoint2: CGPoint(x: rect.maxX - 32, y: rect.maxY - 22))
-        path.curve(to: CGPoint(x: rect.minX + 22, y: rect.maxY - 22), controlPoint1: CGPoint(x: rect.width * 0.62, y: rect.maxY - 29), controlPoint2: CGPoint(x: rect.width * 0.28, y: rect.maxY - 15))
+        path.move(to: CGPoint(x: rect.minX + 15, y: rect.maxY - 10))
+        path.curve(to: CGPoint(x: rect.maxX - 20, y: rect.maxY - 10), controlPoint1: CGPoint(x: rect.width * 0.36, y: rect.maxY - 4), controlPoint2: CGPoint(x: rect.width * 0.65, y: rect.maxY - 15))
+        path.curve(to: CGPoint(x: rect.maxX - 32, y: rect.maxY - 16), controlPoint1: CGPoint(x: rect.maxX - 23, y: rect.maxY - 14), controlPoint2: CGPoint(x: rect.maxX - 27, y: rect.maxY - 16))
+        path.curve(to: CGPoint(x: rect.minX + 18, y: rect.maxY - 16), controlPoint1: CGPoint(x: rect.width * 0.62, y: rect.maxY - 21), controlPoint2: CGPoint(x: rect.width * 0.28, y: rect.maxY - 11))
         path.close()
         return path
     }
