@@ -128,8 +128,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "✈︎ Air"
-        statusItem.button?.toolTip = "Airmessage"
+        if let button = statusItem.button {
+            if let icon = makeStatusBarIcon() {
+                button.image = icon
+                button.imagePosition = .imageOnly
+            } else {
+                button.title = "✈︎ Air"
+            }
+            button.toolTip = "Airmessage"
+        }
         statusItem.menu = menu
 
         menu.addItem(NSMenuItem(title: "Airmessage", action: nil, keyEquivalent: ""))
@@ -176,6 +183,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
         item.target = self
         return item
+    }
+
+    private func makeStatusBarIcon() -> NSImage? {
+        guard let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+              let icon = NSImage(contentsOf: iconURL) else {
+            return nil
+        }
+
+        icon.size = NSSize(width: 18, height: 18)
+        icon.isTemplate = false
+        return icon
     }
 
     private func startClock() {
@@ -620,6 +638,8 @@ final class FlightWindow: NSWindow {
         for window in windows {
             guard let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
                   ownerPID != currentPID,
+                  let ownerName = window[kCGWindowOwnerName as String] as? String,
+                  ownerName != "Finder",
                   let layer = window[kCGWindowLayer as String] as? Int,
                   layer == 0,
                   let alpha = window[kCGWindowAlpha as String] as? Double,
@@ -627,7 +647,8 @@ final class FlightWindow: NSWindow {
                   let bounds = window[kCGWindowBounds as String] as? [String: Any],
                   let rect = windowRect(from: bounds, screenFrame: screenFrame),
                   rect.width > 180,
-                  rect.height > 120 else {
+                  rect.height > 120,
+                  !isDesktopSized(rect, screenFrame: screenFrame) else {
                 continue
             }
 
@@ -643,6 +664,10 @@ final class FlightWindow: NSWindow {
         }
 
         return rects
+    }
+
+    private func isDesktopSized(_ rect: CGRect, screenFrame: CGRect) -> Bool {
+        rect.width > screenFrame.width * 0.92 && rect.height > screenFrame.height * 0.82
     }
 
     private func windowRect(from bounds: [String: Any], screenFrame: CGRect) -> CGRect? {
@@ -811,6 +836,7 @@ final class FlightView: NSView {
     private let planeLayer = CAShapeLayer()
     private let wingLayer = CAShapeLayer()
     private let tailLayer = CAShapeLayer()
+    private let tailHookLayer = CAShapeLayer()
     private let windowLayer = CAShapeLayer()
     private let visibilityMaskLayer = CAShapeLayer()
     private var flightOrigin = CGPoint(x: 0, y: 0)
@@ -874,7 +900,8 @@ final class FlightView: NSView {
         CATransaction.setDisableActions(true)
 
         let flutter = sin(flightOrigin.x / 82) * 4
-        let bannerFrame = CGRect(x: flightOrigin.x, y: flightOrigin.y + 24 + flutter * 0.35, width: bannerWidth, height: 32)
+        let formationBob = sin(flightOrigin.x / 48) * 2.2
+        let bannerFrame = CGRect(x: flightOrigin.x, y: flightOrigin.y + 24 + formationBob, width: bannerWidth, height: 32)
         bannerLayer.frame = bannerFrame
         bannerLayer.path = flagPath(in: CGRect(origin: .zero, size: bannerFrame.size), wave: flutter).cgPath
         flagHighlightLayer.frame = bannerFrame
@@ -882,10 +909,13 @@ final class FlightView: NSView {
 
         textLayer.frame = bannerFrame.insetBy(dx: 14, dy: 8)
 
-        let planeFrame = CGRect(x: bannerFrame.maxX + 20, y: flightOrigin.y + 4, width: 126, height: 78)
+        let planeFrame = CGRect(x: bannerFrame.maxX + 20, y: flightOrigin.y + 4 + formationBob, width: 126, height: 78)
         flightHitFrame = bannerFrame.union(planeFrame)
         ropeLayer.frame = bounds
-        ropeLayer.path = ropePath(from: CGPoint(x: bannerFrame.maxX - 4, y: bannerFrame.midY), to: CGPoint(x: planeFrame.minX + 8, y: planeFrame.midY - 1)).cgPath
+        let tailAnchor = CGPoint(x: planeFrame.minX + 14, y: planeFrame.minY + 38)
+        ropeLayer.path = ropePath(from: CGPoint(x: bannerFrame.maxX - 8, y: bannerFrame.midY), to: tailAnchor).cgPath
+        tailHookLayer.frame = CGRect(x: tailAnchor.x - 2.5, y: tailAnchor.y - 2.5, width: 5, height: 5)
+        tailHookLayer.path = NSBezierPath(ovalIn: tailHookLayer.bounds).cgPath
 
         planeLayer.frame = planeFrame
         planeLayer.path = planePath(in: planeLayer.bounds).cgPath
@@ -903,6 +933,7 @@ final class FlightView: NSView {
         planeLayer.opacity = Float(flightOpacity)
         wingLayer.opacity = Float(flightOpacity)
         tailLayer.opacity = Float(flightOpacity)
+        tailHookLayer.opacity = Float(flightOpacity)
         windowLayer.opacity = Float(flightOpacity)
 
         CATransaction.commit()
@@ -945,6 +976,10 @@ final class FlightView: NSView {
         tailLayer.strokeColor = NSColor(calibratedRed: 0.18, green: 0.52, blue: 0.62, alpha: 0.82).cgColor
         tailLayer.lineWidth = 1
 
+        tailHookLayer.fillColor = NSColor(calibratedRed: 0.64, green: 0.76, blue: 0.79, alpha: 0.92).cgColor
+        tailHookLayer.strokeColor = NSColor(calibratedWhite: 1, alpha: 0.72).cgColor
+        tailHookLayer.lineWidth = 0.7
+
         windowLayer.fillColor = NSColor(calibratedRed: 0.24, green: 0.45, blue: 0.58, alpha: 0.9).cgColor
 
         layer?.addSublayer(bannerLayer)
@@ -954,30 +989,11 @@ final class FlightView: NSView {
         layer?.addSublayer(tailLayer)
         layer?.addSublayer(wingLayer)
         layer?.addSublayer(planeLayer)
+        layer?.addSublayer(tailHookLayer)
         layer?.addSublayer(windowLayer)
 
-        let bob = CABasicAnimation(keyPath: "transform.translation.y")
-        bob.fromValue = -4
-        bob.toValue = 4
-        bob.duration = 0.72
-        bob.autoreverses = true
-        bob.repeatCount = .infinity
-        bob.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        planeLayer.add(bob, forKey: "bob")
-        wingLayer.add(bob, forKey: "bob")
-        tailLayer.add(bob, forKey: "bob")
-        windowLayer.add(bob, forKey: "bob")
-
-        let flagDrift = CABasicAnimation(keyPath: "transform.translation.y")
-        flagDrift.fromValue = -2
-        flagDrift.toValue = 3
-        flagDrift.duration = 1.35
-        flagDrift.autoreverses = true
-        flagDrift.repeatCount = .infinity
-        flagDrift.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        bannerLayer.add(flagDrift, forKey: "flagDrift")
-        flagHighlightLayer.add(flagDrift, forKey: "flagDrift")
-        textLayer.add(flagDrift, forKey: "flagDrift")
+        // The whole flight assembly already rises and falls together in FlightWindow.
+        // Keep individual layers unanimated so the rope remains attached to the tail.
     }
 
     private func flagPath(in rect: CGRect, wave: CGFloat) -> NSBezierPath {

@@ -11,7 +11,7 @@ rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 cp "$BIN" "$APP_DIR/Contents/MacOS/$APP_NAME"
-cp Sources/Airmessage/Resources/* "$APP_DIR/Contents/Resources/"
+cp -R Sources/Airmessage/Resources/. "$APP_DIR/Contents/Resources/"
 
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -26,10 +26,12 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <string>Airmessage</string>
   <key>CFBundleDisplayName</key>
   <string>Airmessage</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.2</string>
+  <string>0.1.3</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
