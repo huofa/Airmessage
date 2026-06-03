@@ -21,6 +21,20 @@ private struct SoundChoice {
     let volume: Float
 }
 
+private enum FlightStyle: String, Codable, CaseIterable {
+    case airplane
+    case wukong
+
+    var title: String {
+        switch self {
+        case .airplane:
+            return "飞机"
+        case .wukong:
+            return "悟空筋斗云"
+        }
+    }
+}
+
 private struct ReminderItem: Codable, Identifiable, Equatable {
     var id: String
     var message: String
@@ -28,15 +42,56 @@ private struct ReminderItem: Codable, Identifiable, Equatable {
     var intervalMinutes: Int?
     var flightRepeatCount: Int
     var isEnabled: Bool
+    var style: FlightStyle
 
     var isRepeating: Bool {
         intervalMinutes != nil
+    }
+
+    init(
+        id: String,
+        message: String,
+        nextFireAt: Date,
+        intervalMinutes: Int?,
+        flightRepeatCount: Int,
+        isEnabled: Bool,
+        style: FlightStyle = .airplane
+    ) {
+        self.id = id
+        self.message = message
+        self.nextFireAt = nextFireAt
+        self.intervalMinutes = intervalMinutes
+        self.flightRepeatCount = flightRepeatCount
+        self.isEnabled = isEnabled
+        self.style = style
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case message
+        case nextFireAt
+        case intervalMinutes
+        case flightRepeatCount
+        case isEnabled
+        case style
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        message = try container.decode(String.self, forKey: .message)
+        nextFireAt = try container.decode(Date.self, forKey: .nextFireAt)
+        intervalMinutes = try container.decodeIfPresent(Int.self, forKey: .intervalMinutes)
+        flightRepeatCount = try container.decode(Int.self, forKey: .flightRepeatCount)
+        isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
+        style = try container.decodeIfPresent(FlightStyle.self, forKey: .style) ?? .airplane
     }
 }
 
 private struct FlightJob {
     let message: String
     let repetitions: Int
+    let style: FlightStyle
 }
 
 private func airmessageHotKeyHandler(
@@ -62,11 +117,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let remindersMenuItem = NSMenuItem(title: "提醒列表", action: nil, keyEquivalent: "")
     private var soundChoiceItems: [NSMenuItem] = []
     private var controlPanel: ControlPanel?
-    private var flightWindow: FlightWindow?
-    private var flightSequenceTask: Task<Void, Never>?
-    private var flightQueue: [FlightJob] = []
-    private var isRunningFlightQueue = false
-    private var flybyPlayer: AVAudioPlayer?
+    private var activeFlightWindows: [FlightWindow] = []
+    private var flightTasks: [Task<Void, Never>] = []
+    private var flybyPlayers: [AVAudioPlayer] = []
     private var hotKeyRef: EventHotKeyRef?
     private var hotKeyHandlerRef: EventHandlerRef?
     private var globalKeyMonitor: Any?
@@ -158,7 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startShortcutMonitoring()
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(600))
-            enqueueFlights([FlightJob(message: primaryReminder.message, repetitions: 1)])
+            launchFlights([FlightJob(message: primaryReminder.message, repetitions: 1, style: primaryReminder.style)])
         }
     }
 
@@ -384,7 +437,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 continue
             }
 
-            jobs.append(FlightJob(message: reminders[index].message, repetitions: reminders[index].flightRepeatCount))
+            jobs.append(FlightJob(message: reminders[index].message, repetitions: reminders[index].flightRepeatCount, style: reminders[index].style))
             if let minutes = reminders[index].intervalMinutes {
                 repeat {
                     reminders[index].nextFireAt = reminders[index].nextFireAt.addingTimeInterval(TimeInterval(minutes * 60))
@@ -396,54 +449,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         saveReminders()
         if !jobs.isEmpty {
-            enqueueFlights(jobs)
+            launchFlights(jobs)
         }
         scheduleNextReminder()
     }
 
-    private func enqueueFlights(_ jobs: [FlightJob]) {
-        flightQueue.append(contentsOf: jobs)
-        guard !isRunningFlightQueue else { return }
-        runFlightQueue()
+    private func launchFlights(_ jobs: [FlightJob]) {
+        for job in jobs {
+            let task = Task { @MainActor in
+                await fly(job)
+            }
+            flightTasks.append(task)
+        }
+        flightTasks.removeAll { $0.isCancelled }
     }
 
-    private func runFlightQueue() {
-        guard !flightQueue.isEmpty else {
-            isRunningFlightQueue = false
-            return
-        }
+    private func fly(_ job: FlightJob) async {
+        for index in 0..<max(1, job.repetitions) {
+            if Task.isCancelled { return }
+            if playSound {
+                playFlybySound()
+            }
 
-        isRunningFlightQueue = true
-        let job = flightQueue.removeFirst()
-        flightSequenceTask = Task { @MainActor in
-            let count = max(1, job.repetitions)
-            for index in 0..<count {
-                if Task.isCancelled { return }
-
-                if playSound {
-                    playFlybySound()
-                }
-
-                if flightWindow == nil {
-                    flightWindow = FlightWindow(message: job.message)
-                } else {
-                    flightWindow?.setMessage(job.message)
-                }
-
-                await withCheckedContinuation { continuation in
-                    flightWindow?.fly(duration: flightDurationSeconds) {
-                        continuation.resume()
+            let laneOffset = CGFloat((activeFlightWindows.count % 5) - 2) * 18
+            let flightWindow = FlightWindow(message: job.message, style: job.style, verticalOffset: laneOffset)
+            activeFlightWindows.append(flightWindow)
+            await withCheckedContinuation { continuation in
+                flightWindow.fly(duration: flightDurationSeconds) { [weak self, weak flightWindow] in
+                    if let flightWindow {
+                        flightWindow.orderOut(nil)
                     }
-                }
-
-                if Task.isCancelled { return }
-
-                if index < count - 1 {
-                    try? await Task.sleep(for: .seconds(2))
+                    self?.activeFlightWindows.removeAll { $0 === flightWindow }
+                    continuation.resume()
                 }
             }
 
-            runFlightQueue()
+            if Task.isCancelled { return }
+            if index < max(1, job.repetitions) - 1 {
+                try? await Task.sleep(for: .seconds(2))
+            }
         }
     }
 
@@ -455,10 +499,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         do {
-            flybyPlayer = try AVAudioPlayer(contentsOf: url)
-            flybyPlayer?.volume = choice.volume
-            flybyPlayer?.prepareToPlay()
-            flybyPlayer?.play()
+            flybyPlayers.removeAll { !$0.isPlaying }
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.volume = choice.volume
+            player.prepareToPlay()
+            player.play()
+            flybyPlayers.append(player)
         } catch {
             NSSound(named: NSSound.Name("Submarine"))?.play()
         }
@@ -504,7 +550,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showReminderNow() {
-        enqueueFlights([FlightJob(message: primaryReminder.message, repetitions: primaryReminder.flightRepeatCount)])
+        launchFlights([FlightJob(message: primaryReminder.message, repetitions: primaryReminder.flightRepeatCount, style: primaryReminder.style)])
     }
 
     @objc private func showControlPanel() {
@@ -662,6 +708,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 toggleItem.representedObject = reminder.id
                 submenu.addItem(toggleItem)
 
+                let editItem = makeMenuItem(title: "编辑：\(reminder.message)", action: #selector(editReminder(_:)), keyEquivalent: "")
+                editItem.representedObject = reminder.id
+                submenu.addItem(editItem)
+
                 let deleteItem = makeMenuItem(title: "删除：\(reminder.message)", action: #selector(deleteReminder(_:)), keyEquivalent: "")
                 deleteItem.representedObject = reminder.id
                 submenu.addItem(deleteItem)
@@ -676,7 +726,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func reminderSummary(_ reminder: ReminderItem) -> String {
         let mode = reminder.intervalMinutes.map { "每 \($0) 分钟" } ?? "一次"
         let state = reminder.isEnabled ? "" : "已停用，"
-        return "\(state)\(reminder.message) · \(mode) · \(formatDate(reminder.nextFireAt)) · 飞 \(reminder.flightRepeatCount) 次"
+        return "\(state)\(reminder.message) · \(reminder.style.title) · \(mode) · \(formatDate(reminder.nextFireAt)) · 飞 \(reminder.flightRepeatCount) 次"
     }
 
     private func formatDate(_ date: Date) -> String {
@@ -690,13 +740,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scheduleNextReminder()
     }
 
+    @objc private func editReminder(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let index = reminders.firstIndex(where: { $0.id == id }),
+              let updated = presentReminderEditor(existing: reminders[index]) else {
+            return
+        }
+
+        reminders[index] = updated
+        saveReminders()
+        scheduleNextReminder()
+    }
+
     @objc private func testReminder(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String,
               let reminder = reminders.first(where: { $0.id == id }) else {
             return
         }
 
-        enqueueFlights([FlightJob(message: reminder.message, repetitions: reminder.flightRepeatCount)])
+        launchFlights([FlightJob(message: reminder.message, repetitions: reminder.flightRepeatCount, style: reminder.style)])
     }
 
     @objc private func toggleReminder(_ sender: NSMenuItem) {
@@ -727,24 +789,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scheduleNextReminder()
     }
 
-    private func presentReminderEditor() -> ReminderItem? {
+    private func presentReminderEditor(existing: ReminderItem? = nil) -> ReminderItem? {
         let now = Date()
         let labelWidth: CGFloat = 72
         let fieldX: CGFloat = 92
         let fieldWidth: CGFloat = 238
         let rowHeight: CGFloat = 28
-        let form = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 152))
+        let form = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 190))
 
-        let messageField = NSTextField(string: "该喝水啦")
+        let messageField = NSTextField(string: existing?.message ?? "该喝水啦")
         messageField.placeholderString = "提醒事项"
-        messageField.frame = NSRect(x: fieldX, y: 120, width: fieldWidth, height: rowHeight)
+        messageField.frame = NSRect(x: fieldX, y: 158, width: fieldWidth, height: rowHeight)
 
-        let dateField = NSTextField(string: Self.reminderDateFormatter.string(from: now.addingTimeInterval(3600)))
+        let dateField = NSTextField(string: Self.reminderDateFormatter.string(from: existing?.nextFireAt ?? now.addingTimeInterval(3600)))
         dateField.placeholderString = "yyyy-MM-dd HH:mm"
-        dateField.frame = NSRect(x: fieldX, y: 82, width: fieldWidth, height: rowHeight)
+        dateField.frame = NSRect(x: fieldX, y: 120, width: fieldWidth, height: rowHeight)
 
         let repeatPopup = NSPopUpButton()
-        repeatPopup.frame = NSRect(x: fieldX, y: 44, width: fieldWidth, height: rowHeight)
+        repeatPopup.frame = NSRect(x: fieldX, y: 82, width: fieldWidth, height: rowHeight)
         let repeatOptions = [
             ("一次性提醒", 0),
             ("每 10 分钟", 10),
@@ -758,15 +820,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             repeatPopup.addItem(withTitle: title)
             repeatPopup.lastItem?.representedObject = minutes
         }
+        if let interval = existing?.intervalMinutes,
+           let item = repeatPopup.itemArray.first(where: { ($0.representedObject as? Int) == interval }) {
+            repeatPopup.select(item)
+        }
 
-        let repeatCountField = NSTextField(string: "1")
+        let stylePopup = NSPopUpButton()
+        stylePopup.frame = NSRect(x: fieldX, y: 44, width: fieldWidth, height: rowHeight)
+        FlightStyle.allCases.forEach { style in
+            stylePopup.addItem(withTitle: style.title)
+            stylePopup.lastItem?.representedObject = style.rawValue
+        }
+        if let style = existing?.style,
+           let item = stylePopup.itemArray.first(where: { ($0.representedObject as? String) == style.rawValue }) {
+            stylePopup.select(item)
+        }
+
+        let repeatCountField = NSTextField(string: "\(existing?.flightRepeatCount ?? 1)")
         repeatCountField.placeholderString = "1-12"
         repeatCountField.frame = NSRect(x: fieldX, y: 6, width: 80, height: rowHeight)
 
         [
-            ("提醒事项", 120),
-            ("首次时间", 82),
-            ("提醒方式", 44),
+            ("提醒事项", 158),
+            ("首次时间", 120),
+            ("提醒方式", 82),
+            ("样式", 44),
             ("飞行次数", 6)
         ].forEach { title, y in
             let label = NSTextField(labelWithString: title)
@@ -778,10 +856,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         form.addSubview(messageField)
         form.addSubview(dateField)
         form.addSubview(repeatPopup)
+        form.addSubview(stylePopup)
         form.addSubview(repeatCountField)
 
         let alert = NSAlert()
-        alert.messageText = "新建提醒"
+        alert.messageText = existing == nil ? "新建提醒" : "编辑提醒"
         alert.informativeText = "时间格式：yyyy-MM-dd HH:mm，例如 2026-06-04 18:30。"
         alert.accessoryView = form
         alert.addButton(withTitle: "保存")
@@ -796,14 +875,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ?? now.addingTimeInterval(3600)
         let minutes = repeatPopup.selectedItem?.representedObject as? Int ?? 0
         let repeatCount = max(1, min(12, Int(repeatCountField.stringValue) ?? 1))
+        let styleRawValue = stylePopup.selectedItem?.representedObject as? String ?? FlightStyle.airplane.rawValue
+        let style = FlightStyle(rawValue: styleRawValue) ?? .airplane
 
         return ReminderItem(
-            id: UUID().uuidString,
+            id: existing?.id ?? UUID().uuidString,
             message: text.isEmpty ? "该喝水啦" : text,
             nextFireAt: date,
             intervalMinutes: minutes == 0 ? nil : minutes,
             flightRepeatCount: repeatCount,
-            isEnabled: true
+            isEnabled: existing?.isEnabled ?? true,
+            style: style
         )
     }
 
@@ -834,12 +916,14 @@ final class FlightWindow: NSWindow {
     private var currentFlightX: CGFloat = 0
     private var currentFlightY: CGFloat = 0
     private let contentWidth: CGFloat
+    private let verticalOffset: CGFloat
 
-    init(message: String) {
+    fileprivate init(message: String, style: FlightStyle, verticalOffset: CGFloat = 0) {
         let screenFrame = NSScreen.main?.frame ?? .init(x: 0, y: 0, width: 1440, height: 900)
         contentWidth = min(760, screenFrame.width * 0.74)
+        self.verticalOffset = verticalOffset
 
-        flightView = FlightView(message: message, maxFlightWidth: contentWidth)
+        flightView = FlightView(message: message, style: style, maxFlightWidth: contentWidth)
         super.init(
             contentRect: screenFrame,
             styleMask: [.borderless],
@@ -871,7 +955,7 @@ final class FlightWindow: NSWindow {
         animationDuration = max(4, min(45, duration))
         animationStartX = -320
         animationEndX = screenFrame.width + 48
-        animationY = screenFrame.height * 0.60
+        animationY = screenFrame.height * 0.60 + verticalOffset
         animationCompletion = completion
         flightView.updateOcclusionMask(excluding: topmostUserWindowRects(in: screenFrame))
         setFlightPosition(x: animationStartX, y: animationY, opacity: 0)
@@ -1189,6 +1273,7 @@ final class ControlPanel: NSObject {
 
 final class FlightView: NSView {
     private var message: String
+    private let style: FlightStyle
     private let maxFlightWidth: CGFloat
     private let bannerLayer = CAShapeLayer()
     private let ropeLayer = CAShapeLayer()
@@ -1201,6 +1286,11 @@ final class FlightView: NSView {
     private let tailLayer = CAShapeLayer()
     private let tailHookLayer = CAShapeLayer()
     private let windowLayer = CAShapeLayer()
+    private let cloudDetailLayer = CAShapeLayer()
+    private let wukongBodyLayer = CAShapeLayer()
+    private let wukongHeadLayer = CAShapeLayer()
+    private let wukongStaffLayer = CAShapeLayer()
+    private let wukongFaceLayer = CAShapeLayer()
     private let visibilityMaskLayer = CAShapeLayer()
     private var flightOrigin = CGPoint(x: 0, y: 0)
     private var flightOpacity: CGFloat = 1
@@ -1210,8 +1300,9 @@ final class FlightView: NSView {
         flightOpacity
     }
 
-    init(message: String, maxFlightWidth: CGFloat) {
+    fileprivate init(message: String, style: FlightStyle, maxFlightWidth: CGFloat) {
         self.message = message
+        self.style = style
         self.maxFlightWidth = maxFlightWidth
         super.init(frame: .zero)
         wantsLayer = true
@@ -1226,7 +1317,8 @@ final class FlightView: NSView {
 
     override func layout() {
         super.layout()
-        bannerWidth = min(maxFlightWidth - 122, max(112, CGFloat(message.count) * 12 + 40))
+        let maxMessageWidth = style == .wukong ? maxFlightWidth - 104 : maxFlightWidth - 122
+        bannerWidth = min(maxMessageWidth, max(122, CGFloat(message.count) * 12 + 44))
         positionLayers()
     }
 
@@ -1263,16 +1355,21 @@ final class FlightView: NSView {
         CATransaction.setDisableActions(true)
 
         let flutter = sin(flightOrigin.x / 82) * 4.5
+        let breath = sin(flightOrigin.x / 38) * 1.8
         let formationBob = sin(flightOrigin.x / 46) * 3.4 + sin(flightOrigin.x / 119) * 1.8
-        let bannerFrame = CGRect(x: flightOrigin.x, y: flightOrigin.y + 12 + formationBob, width: bannerWidth, height: 40)
+        let bannerHeight: CGFloat = style == .wukong ? 46 : 40
+        let bannerFrame = CGRect(x: flightOrigin.x, y: flightOrigin.y + 12 + formationBob + breath * 0.4, width: bannerWidth, height: bannerHeight)
         bannerLayer.frame = bannerFrame
-        bannerLayer.path = flagPath(in: CGRect(origin: .zero, size: bannerFrame.size), wave: flutter).cgPath
+        bannerLayer.path = bubblePath(in: CGRect(origin: .zero, size: bannerFrame.size), wave: flutter, style: style).cgPath
         flagHighlightLayer.frame = bannerFrame
         flagHighlightLayer.path = flagHighlightPath(in: CGRect(origin: .zero, size: bannerFrame.size)).cgPath
 
-        textLayer.frame = bannerFrame.insetBy(dx: 17, dy: 12)
+        textLayer.frame = bannerFrame.insetBy(dx: 17, dy: style == .wukong ? 15 : 12)
+        textLayer.string = displayMessage(for: bannerFrame.width)
+        textLayer.alignmentMode = message.count > visibleCharacterCount(for: bannerFrame.width) ? .left : .center
 
         let planeFrame = CGRect(x: bannerFrame.maxX + 9, y: flightOrigin.y + 4 + formationBob, width: 154, height: 79)
+        let wukongFrame = CGRect(x: bannerFrame.maxX - 16, y: flightOrigin.y + 22 + formationBob + breath, width: 94, height: 94)
         flightHitFrame = bannerFrame.union(planeFrame)
         ropeLayer.frame = bounds
         let tailAnchor = CGPoint(x: planeFrame.minX + 14, y: planeFrame.minY + 36)
@@ -1292,18 +1389,35 @@ final class FlightView: NSView {
         tailLayer.path = tailPath(in: tailLayer.bounds).cgPath
         windowLayer.frame = planeFrame
         windowLayer.path = windowPath(in: windowLayer.bounds).cgPath
+        cloudDetailLayer.frame = bannerFrame
+        cloudDetailLayer.path = cloudDetailPath(in: cloudDetailLayer.bounds, wave: flutter).cgPath
+        wukongBodyLayer.frame = wukongFrame
+        wukongBodyLayer.path = wukongBodyPath(in: wukongBodyLayer.bounds).cgPath
+        wukongHeadLayer.frame = wukongFrame
+        wukongHeadLayer.path = wukongHeadPath(in: wukongHeadLayer.bounds).cgPath
+        wukongStaffLayer.frame = wukongFrame
+        wukongStaffLayer.path = wukongStaffPath(in: wukongStaffLayer.bounds).cgPath
+        wukongFaceLayer.frame = wukongFrame
+        wukongFaceLayer.path = wukongFacePath(in: wukongFaceLayer.bounds).cgPath
 
         bannerLayer.opacity = Float(flightOpacity)
-        ropeLayer.opacity = Float(flightOpacity * 0.78)
+        ropeLayer.opacity = Float(style == .airplane ? flightOpacity * 0.78 : 0)
         flagHighlightLayer.opacity = Float(flightOpacity)
         textLayer.opacity = Float(flightOpacity)
-        tailLayer.opacity = Float(flightOpacity)
-        rearWingLayer.opacity = Float(flightOpacity)
-        wingLayer.opacity = Float(flightOpacity)
-        planeLayer.opacity = Float(flightOpacity)
-        bellyAccentLayer.opacity = Float(flightOpacity * 0.85)
+        let airplaneOpacity = style == .airplane ? flightOpacity : 0
+        let wukongOpacity = style == .wukong ? flightOpacity : 0
+        tailLayer.opacity = Float(airplaneOpacity)
+        rearWingLayer.opacity = Float(airplaneOpacity)
+        wingLayer.opacity = Float(airplaneOpacity)
+        planeLayer.opacity = Float(airplaneOpacity)
+        bellyAccentLayer.opacity = Float(airplaneOpacity * 0.85)
         tailHookLayer.opacity = 0
-        windowLayer.opacity = Float(flightOpacity)
+        windowLayer.opacity = Float(airplaneOpacity)
+        cloudDetailLayer.opacity = Float(wukongOpacity * 0.55)
+        wukongStaffLayer.opacity = Float(wukongOpacity)
+        wukongBodyLayer.opacity = Float(wukongOpacity)
+        wukongHeadLayer.opacity = Float(wukongOpacity)
+        wukongFaceLayer.opacity = Float(wukongOpacity)
 
         CATransaction.commit()
     }
@@ -1361,9 +1475,28 @@ final class FlightView: NSView {
         tailHookLayer.lineWidth = 0.7
 
         windowLayer.fillColor = NSColor(calibratedRed: 0.03, green: 0.55, blue: 0.92, alpha: 0.88).cgColor
+        cloudDetailLayer.fillColor = nil
+        cloudDetailLayer.strokeColor = NSColor(calibratedWhite: 1, alpha: 0.42).cgColor
+        cloudDetailLayer.lineWidth = 1.0
+        cloudDetailLayer.lineCap = .round
+
+        wukongBodyLayer.fillColor = NSColor(calibratedRed: 0.93, green: 0.12, blue: 0.07, alpha: 1).cgColor
+        wukongBodyLayer.strokeColor = NSColor(calibratedRed: 0.72, green: 0.04, blue: 0.03, alpha: 0.7).cgColor
+        wukongBodyLayer.lineWidth = 1.0
+        wukongHeadLayer.fillColor = NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.42, alpha: 1).cgColor
+        wukongHeadLayer.strokeColor = NSColor(calibratedRed: 0.88, green: 0.08, blue: 0.04, alpha: 0.84).cgColor
+        wukongHeadLayer.lineWidth = 1.0
+        wukongStaffLayer.fillColor = nil
+        wukongStaffLayer.strokeColor = NSColor(calibratedRed: 0.74, green: 0.12, blue: 0.06, alpha: 1).cgColor
+        wukongStaffLayer.lineWidth = 4.0
+        wukongStaffLayer.lineCap = .round
+        wukongFaceLayer.fillColor = NSColor.white.cgColor
+        wukongFaceLayer.strokeColor = NSColor(calibratedRed: 0.72, green: 0.04, blue: 0.03, alpha: 0.8).cgColor
+        wukongFaceLayer.lineWidth = 0.8
 
         layer?.addSublayer(bannerLayer)
         layer?.addSublayer(flagHighlightLayer)
+        layer?.addSublayer(cloudDetailLayer)
         layer?.addSublayer(textLayer)
         layer?.addSublayer(ropeLayer)
         layer?.addSublayer(tailLayer)
@@ -1372,12 +1505,37 @@ final class FlightView: NSView {
         layer?.addSublayer(planeLayer)
         layer?.addSublayer(bellyAccentLayer)
         layer?.addSublayer(windowLayer)
+        layer?.addSublayer(wukongStaffLayer)
+        layer?.addSublayer(wukongBodyLayer)
+        layer?.addSublayer(wukongHeadLayer)
+        layer?.addSublayer(wukongFaceLayer)
 
         // The whole flight assembly already rises and falls together in FlightWindow.
         // Keep individual layers unanimated so the rope remains attached to the tail.
     }
 
-    private func flagPath(in rect: CGRect, wave: CGFloat) -> NSBezierPath {
+    private func displayMessage(for width: CGFloat) -> String {
+        let characters = Array(message)
+        let visibleCount = visibleCharacterCount(for: width)
+        guard characters.count > visibleCount else {
+            return message
+        }
+
+        let spacer = Array("   ")
+        let loop = characters + spacer + characters
+        let start = Int(abs(flightOrigin.x) / 9) % (characters.count + spacer.count)
+        return String(loop[start..<(start + visibleCount)])
+    }
+
+    private func visibleCharacterCount(for width: CGFloat) -> Int {
+        max(6, Int((width - 34) / 12))
+    }
+
+    private func bubblePath(in rect: CGRect, wave: CGFloat, style: FlightStyle) -> NSBezierPath {
+        if style == .wukong {
+            return cloudBubblePath(in: rect, wave: wave)
+        }
+
         let wave = wave * 0.16
         let r = rect.insetBy(dx: 1.0, dy: 2.5)
         let path = NSBezierPath()
@@ -1389,6 +1547,23 @@ final class FlightView: NSView {
         path.curve(to: CGPoint(x: r.minX + radius, y: r.maxY), controlPoint1: CGPoint(x: r.midX + 34, y: r.maxY + 1.8), controlPoint2: CGPoint(x: r.midX - 36, y: r.maxY - 2.0))
         path.curve(to: CGPoint(x: r.minX, y: r.midY), controlPoint1: CGPoint(x: r.minX + 6, y: r.maxY - 1), controlPoint2: CGPoint(x: r.minX, y: r.maxY - 7))
         path.curve(to: CGPoint(x: r.minX + radius, y: r.minY), controlPoint1: CGPoint(x: r.minX, y: r.minY + 7), controlPoint2: CGPoint(x: r.minX + 6, y: r.minY + 1))
+        path.close()
+        return path
+    }
+
+    private func cloudBubblePath(in rect: CGRect, wave: CGFloat) -> NSBezierPath {
+        let wave = wave * 0.22
+        let r = rect.insetBy(dx: 1.2, dy: 1.8)
+        let path = NSBezierPath()
+        path.move(to: CGPoint(x: r.minX + 18, y: r.midY - 3))
+        path.curve(to: CGPoint(x: r.minX + 39, y: r.maxY - 4 + wave), controlPoint1: CGPoint(x: r.minX + 9, y: r.midY + 8), controlPoint2: CGPoint(x: r.minX + 21, y: r.maxY + 1))
+        path.curve(to: CGPoint(x: r.midX - 10, y: r.maxY - 3 - wave), controlPoint1: CGPoint(x: r.minX + 52, y: r.maxY + 6), controlPoint2: CGPoint(x: r.midX - 40, y: r.maxY + 2))
+        path.curve(to: CGPoint(x: r.maxX - 31, y: r.maxY - 5 + wave), controlPoint1: CGPoint(x: r.midX + 18, y: r.maxY + 5), controlPoint2: CGPoint(x: r.maxX - 50, y: r.maxY + 1))
+        path.curve(to: CGPoint(x: r.maxX - 4, y: r.midY), controlPoint1: CGPoint(x: r.maxX - 12, y: r.maxY - 7), controlPoint2: CGPoint(x: r.maxX, y: r.maxY - 1))
+        path.curve(to: CGPoint(x: r.maxX - 34, y: r.minY + 6 - wave), controlPoint1: CGPoint(x: r.maxX + 3, y: r.minY + 11), controlPoint2: CGPoint(x: r.maxX - 11, y: r.minY + 1))
+        path.curve(to: CGPoint(x: r.midX + 4, y: r.minY + 4 + wave), controlPoint1: CGPoint(x: r.maxX - 48, y: r.minY - 2), controlPoint2: CGPoint(x: r.midX + 35, y: r.minY))
+        path.curve(to: CGPoint(x: r.minX + 28, y: r.minY + 6 - wave), controlPoint1: CGPoint(x: r.midX - 25, y: r.minY - 3), controlPoint2: CGPoint(x: r.minX + 48, y: r.minY + 1))
+        path.curve(to: CGPoint(x: r.minX + 18, y: r.midY - 3), controlPoint1: CGPoint(x: r.minX + 10, y: r.minY + 9), controlPoint2: CGPoint(x: r.minX + 7, y: r.midY - 9))
         path.close()
         return path
     }
@@ -1407,6 +1582,68 @@ final class FlightView: NSView {
         let path = NSBezierPath()
         path.move(to: start)
         path.curve(to: end, controlPoint1: CGPoint(x: start.x + 14, y: start.y + 6), controlPoint2: CGPoint(x: end.x - 20, y: end.y - 5))
+        return path
+    }
+
+    private func cloudDetailPath(in rect: CGRect, wave: CGFloat) -> NSBezierPath {
+        let path = NSBezierPath()
+        let y = rect.midY + sin(flightOrigin.x / 31) * 1.4
+        path.move(to: CGPoint(x: rect.minX + 22, y: y - 4))
+        path.curve(to: CGPoint(x: rect.minX + 52, y: y - 3), controlPoint1: CGPoint(x: rect.minX + 30, y: y + 8), controlPoint2: CGPoint(x: rect.minX + 44, y: y + 8))
+        path.move(to: CGPoint(x: rect.maxX - 62, y: y - 5 + wave * 0.08))
+        path.curve(to: CGPoint(x: rect.maxX - 28, y: y - 5), controlPoint1: CGPoint(x: rect.maxX - 52, y: y + 7), controlPoint2: CGPoint(x: rect.maxX - 38, y: y + 7))
+        return path
+    }
+
+    private func wukongStaffPath(in rect: CGRect) -> NSBezierPath {
+        let path = NSBezierPath()
+        path.move(to: CGPoint(x: rect.minX + 8, y: rect.maxY - 33))
+        path.line(to: CGPoint(x: rect.maxX - 8, y: rect.maxY - 18))
+        return path
+    }
+
+    private func wukongBodyPath(in rect: CGRect) -> NSBezierPath {
+        let path = NSBezierPath()
+        path.move(to: CGPoint(x: rect.midX - 5, y: rect.maxY - 36))
+        path.curve(to: CGPoint(x: rect.midX + 13, y: rect.maxY - 56), controlPoint1: CGPoint(x: rect.midX + 9, y: rect.maxY - 38), controlPoint2: CGPoint(x: rect.midX + 17, y: rect.maxY - 46))
+        path.line(to: CGPoint(x: rect.midX + 28, y: rect.minY + 17))
+        path.line(to: CGPoint(x: rect.midX + 17, y: rect.minY + 14))
+        path.line(to: CGPoint(x: rect.midX + 4, y: rect.maxY - 54))
+        path.line(to: CGPoint(x: rect.midX - 21, y: rect.minY + 18))
+        path.line(to: CGPoint(x: rect.midX - 32, y: rect.minY + 15))
+        path.line(to: CGPoint(x: rect.midX - 14, y: rect.maxY - 55))
+        path.curve(to: CGPoint(x: rect.midX - 5, y: rect.maxY - 36), controlPoint1: CGPoint(x: rect.midX - 27, y: rect.maxY - 50), controlPoint2: CGPoint(x: rect.midX - 23, y: rect.maxY - 37))
+        path.close()
+
+        let tail = NSBezierPath()
+        tail.move(to: CGPoint(x: rect.midX - 24, y: rect.maxY - 58))
+        tail.curve(to: CGPoint(x: rect.midX - 47, y: rect.maxY - 48), controlPoint1: CGPoint(x: rect.midX - 45, y: rect.maxY - 65), controlPoint2: CGPoint(x: rect.midX - 54, y: rect.maxY - 58))
+        tail.curve(to: CGPoint(x: rect.midX - 31, y: rect.maxY - 43), controlPoint1: CGPoint(x: rect.midX - 39, y: rect.maxY - 38), controlPoint2: CGPoint(x: rect.midX - 23, y: rect.maxY - 43))
+        path.append(tail)
+        return path
+    }
+
+    private func wukongHeadPath(in rect: CGRect) -> NSBezierPath {
+        let path = NSBezierPath(ovalIn: CGRect(x: rect.midX - 17, y: rect.maxY - 35, width: 31, height: 27))
+        let hair = NSBezierPath()
+        hair.move(to: CGPoint(x: rect.midX - 16, y: rect.maxY - 20))
+        hair.line(to: CGPoint(x: rect.midX - 8, y: rect.maxY - 5))
+        hair.line(to: CGPoint(x: rect.midX - 2, y: rect.maxY - 19))
+        hair.line(to: CGPoint(x: rect.midX + 8, y: rect.maxY - 6))
+        hair.line(to: CGPoint(x: rect.midX + 10, y: rect.maxY - 22))
+        hair.close()
+        path.append(hair)
+        return path
+    }
+
+    private func wukongFacePath(in rect: CGRect) -> NSBezierPath {
+        let path = NSBezierPath()
+        let eye1 = NSBezierPath(ovalIn: CGRect(x: rect.midX - 8, y: rect.maxY - 25, width: 4, height: 3))
+        let eye2 = NSBezierPath(ovalIn: CGRect(x: rect.midX + 5, y: rect.maxY - 25, width: 4, height: 3))
+        path.append(eye1)
+        path.append(eye2)
+        path.move(to: CGPoint(x: rect.midX - 9, y: rect.maxY - 16))
+        path.line(to: CGPoint(x: rect.midX + 10, y: rect.maxY - 16))
         return path
     }
 

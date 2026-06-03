@@ -1,6 +1,6 @@
 # Airmessage
 
-Version: `0.1.8`
+Version: `0.1.9`
 
 一个极简 macOS 菜单栏小工具：到点时从桌面飞过一架小飞机，带一条低频消息提醒。
 
@@ -25,7 +25,7 @@ chmod +x build_dmg.sh
 ./build_dmg.sh
 ```
 
-生成的 `Airmessage-0.1.8.dmg` 打开后，把 `Airmessage.app` 拖到 `Applications` 即可。
+生成的 `Airmessage-0.1.9.dmg` 打开后，把 `Airmessage.app` 拖到 `Applications` 即可。
 
 ## 功能
 
@@ -35,6 +35,8 @@ chmod +x build_dmg.sh
 - 支持多个自定义提醒，可设置未来年月日时间。
 - 支持一次性提醒，或每 10/20/30/40/50/60 分钟循环提醒。
 - 支持每条提醒自定义飞行次数，并可设置全局飞行时长。
+- 支持飞机和悟空筋斗云两种提醒样式，并可编辑任意提醒。
+- 支持同屏多架同时飞行，长文字会自动循环滚动展示。
 - 支持暂停、继续、立刻试飞。
 - 支持 `右 Command + 右 Option + 0` 快捷试飞，并注册系统级 `Command + Option + 0` 以便桌面空白时也能触发。
 - 飞机飞过时可用鼠标左键拖动位置，松开后继续向右飞行。
