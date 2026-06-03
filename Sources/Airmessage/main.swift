@@ -6,8 +6,17 @@ private enum DefaultsKey {
     static let intervalMinutes = "intervalMinutes"
     static let isPaused = "isPaused"
     static let playSound = "playSound"
+    static let selectedSound = "selectedSound"
     static let flightRepeatCount = "flightRepeatCount"
     static let flightDurationSeconds = "flightDurationSeconds"
+}
+
+private struct SoundChoice {
+    let id: String
+    let title: String
+    let fileName: String
+    let fileExtension: String
+    let volume: Float
 }
 
 @MainActor
@@ -17,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let nextItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let pauseItem = NSMenuItem(title: "", action: #selector(togglePause), keyEquivalent: "")
     private let soundItem = NSMenuItem(title: "", action: #selector(toggleSound), keyEquivalent: "")
+    private var soundChoiceItems: [NSMenuItem] = []
     private var controlPanel: ControlPanel?
     private var flightWindow: FlightWindow?
     private var flightSequenceTask: Task<Void, Never>?
@@ -27,6 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var clockTimer: Timer?
     private var nextReminderDate = Date()
     private var isPaused = UserDefaults.standard.bool(forKey: DefaultsKey.isPaused)
+    private let soundChoices = [
+        SoundChoice(id: "long", title: "长空气声 11 秒", fileName: "flyby_long", fileExtension: "mp3", volume: 0.72),
+        SoundChoice(id: "soft", title: "柔和掠过声", fileName: "flyby", fileExtension: "wav", volume: 0.62),
+        SoundChoice(id: "jet", title: "强劲喷气 28 秒", fileName: "flyby_jet", fileExtension: "mp3", volume: 0.48)
+    ]
 
     private var message: String {
         get {
@@ -58,6 +73,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         set {
             UserDefaults.standard.set(newValue, forKey: DefaultsKey.playSound)
         }
+    }
+
+    private var selectedSoundID: String {
+        get {
+            let saved = UserDefaults.standard.string(forKey: DefaultsKey.selectedSound) ?? ""
+            return soundChoices.contains { $0.id == saved } ? saved : "long"
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: DefaultsKey.selectedSound)
+        }
+    }
+
+    private var selectedSoundChoice: SoundChoice {
+        soundChoices.first { $0.id == selectedSoundID } ?? soundChoices[0]
     }
 
     private var flightRepeatCount: Int {
@@ -126,6 +155,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.setSubmenu(presets, for: presetsItem)
 
         menu.addItem(soundItem)
+        let soundMenu = NSMenu()
+        soundChoiceItems = soundChoices.map { choice in
+            let item = makeMenuItem(title: choice.title, action: #selector(selectSound(_:)), keyEquivalent: "")
+            item.representedObject = choice.id
+            soundMenu.addItem(item)
+            return item
+        }
+        let soundMenuItem = NSMenuItem(title: "选择音效", action: nil, keyEquivalent: "")
+        menu.addItem(soundMenuItem)
+        menu.setSubmenu(soundMenu, for: soundMenuItem)
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
         pauseItem.target = self
@@ -226,14 +265,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func playFlybySound() {
-        guard let url = flybySoundURL() else {
+        let choice = selectedSoundChoice
+        guard let url = soundURL(fileName: choice.fileName, fileExtension: choice.fileExtension) else {
             NSSound(named: NSSound.Name("Submarine"))?.play()
             return
         }
 
         do {
             flybyPlayer = try AVAudioPlayer(contentsOf: url)
-            flybyPlayer?.volume = 0.62
+            flybyPlayer?.volume = choice.volume
             flybyPlayer?.prepareToPlay()
             flybyPlayer?.play()
         } catch {
@@ -241,8 +281,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func flybySoundURL() -> URL? {
-        if let url = Bundle.main.url(forResource: "flyby", withExtension: "wav") {
+    private func soundURL(fileName: String, fileExtension: String) -> URL? {
+        if let url = Bundle.main.url(forResource: fileName, withExtension: fileExtension) {
             return url
         }
 
@@ -250,7 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let resourceURL = executableURL
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("Resources/flyby.wav")
+            .appendingPathComponent("Resources/\(fileName).\(fileExtension)")
         return FileManager.default.fileExists(atPath: resourceURL.path) ? resourceURL : nil
     }
 
@@ -259,6 +299,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         nextItem.title = "下次提醒：\(pauseText)"
         pauseItem.title = isPaused ? "继续提醒" : "暂停提醒"
         soundItem.title = playSound ? "提示音：开" : "提示音：关"
+        soundChoiceItems.forEach { item in
+            item.state = (item.representedObject as? String) == selectedSoundID ? .on : .off
+        }
         statusItem.button?.contentTintColor = isPaused ? .secondaryLabelColor : .labelColor
     }
 
@@ -302,6 +345,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleSound() {
         playSound.toggle()
+        updateMenu()
+    }
+
+    @objc private func selectSound(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        selectedSoundID = id
         updateMenu()
     }
 

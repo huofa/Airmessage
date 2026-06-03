@@ -29,4 +29,20 @@ open .build/Airmessage.app
 - 支持 `Command + 0` 快捷试飞。
 - 飞机飞过时可用鼠标左键拖动位置，松开后继续向右飞行。
 - 白色飞机牵引湖蓝色飘旗提醒，从桌面层优雅掠过。
-- 内置柔和 fly-by 音效，可在菜单栏开关。
+- 内置多种 fly-by 音效，可在菜单栏开关和选择。
+
+## 自定义音效
+
+音效文件放在：
+
+```text
+Sources/Airmessage/Resources/
+```
+
+当前内置文件：
+
+- `flyby_long.mp3`：长空气声，约 11 秒，默认使用。
+- `flyby_jet.mp3`：强劲喷气声，约 28 秒。
+- `flyby.wav`：柔和备用音效。
+
+打包时 `build_app.sh` 会复制资源到 `.app/Contents/Resources/`。
