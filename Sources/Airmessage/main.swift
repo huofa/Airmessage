@@ -892,6 +892,7 @@ final class FlightView: NSView {
     private let ropeLayer = CAShapeLayer()
     private let flagHighlightLayer = CAShapeLayer()
     private let textLayer = CATextLayer()
+    private let planeImageLayer = CALayer()
     private let planeLayer = CAShapeLayer()
     private let bellyAccentLayer = CAShapeLayer()
     private let wingLayer = CAShapeLayer()
@@ -902,6 +903,7 @@ final class FlightView: NSView {
     private var flightOrigin = CGPoint(x: 0, y: 0)
     private var flightOpacity: CGFloat = 1
     private var bannerWidth: CGFloat = 132
+    private var usesPlaneImage = false
     private(set) var flightHitFrame = CGRect.zero
     var currentOpacity: CGFloat {
         flightOpacity
@@ -961,22 +963,23 @@ final class FlightView: NSView {
 
         let flutter = sin(flightOrigin.x / 82) * 4.5
         let formationBob = sin(flightOrigin.x / 46) * 3.2 + sin(flightOrigin.x / 119) * 1.4
-        let bannerFrame = CGRect(x: flightOrigin.x, y: flightOrigin.y + 24 + formationBob, width: bannerWidth, height: 32)
+        let bannerFrame = CGRect(x: flightOrigin.x, y: flightOrigin.y + 24 + formationBob, width: bannerWidth, height: 34)
         bannerLayer.frame = bannerFrame
         bannerLayer.path = flagPath(in: CGRect(origin: .zero, size: bannerFrame.size), wave: flutter).cgPath
         flagHighlightLayer.frame = bannerFrame
         flagHighlightLayer.path = flagHighlightPath(in: CGRect(origin: .zero, size: bannerFrame.size)).cgPath
 
-        textLayer.frame = bannerFrame.insetBy(dx: 14, dy: 8)
+        textLayer.frame = bannerFrame.insetBy(dx: 14, dy: 9)
 
-        let planeFrame = CGRect(x: bannerFrame.maxX + 20, y: flightOrigin.y + 4 + formationBob, width: 126, height: 78)
+        let planeFrame = CGRect(x: bannerFrame.maxX + 9, y: flightOrigin.y + 4 + formationBob, width: 154, height: 79)
         flightHitFrame = bannerFrame.union(planeFrame)
         ropeLayer.frame = bounds
-        let tailAnchor = CGPoint(x: planeFrame.minX + 24, y: planeFrame.minY + 43)
-        ropeLayer.path = ropePath(from: CGPoint(x: bannerFrame.maxX - 8, y: bannerFrame.midY), to: tailAnchor).cgPath
+        let tailAnchor = CGPoint(x: planeFrame.minX + 8, y: planeFrame.minY + 41)
+        ropeLayer.path = ropePath(from: CGPoint(x: bannerFrame.maxX - 2, y: bannerFrame.midY), to: tailAnchor).cgPath
         tailHookLayer.frame = CGRect(x: tailAnchor.x - 2.5, y: tailAnchor.y - 2.5, width: 5, height: 5)
         tailHookLayer.path = NSBezierPath(ovalIn: tailHookLayer.bounds).cgPath
 
+        planeImageLayer.frame = planeFrame
         planeLayer.frame = planeFrame
         planeLayer.path = planePath(in: planeLayer.bounds).cgPath
         bellyAccentLayer.frame = planeFrame
@@ -992,31 +995,35 @@ final class FlightView: NSView {
         ropeLayer.opacity = Float(flightOpacity * 0.78)
         flagHighlightLayer.opacity = Float(flightOpacity)
         textLayer.opacity = Float(flightOpacity)
-        planeLayer.opacity = Float(flightOpacity)
-        bellyAccentLayer.opacity = Float(flightOpacity * 0.9)
-        wingLayer.opacity = Float(flightOpacity)
-        tailLayer.opacity = Float(flightOpacity)
-        tailHookLayer.opacity = Float(flightOpacity)
-        windowLayer.opacity = Float(flightOpacity)
+        planeImageLayer.opacity = Float(flightOpacity)
+        let vectorOpacity = usesPlaneImage ? CGFloat(0) : flightOpacity
+        planeLayer.opacity = Float(vectorOpacity)
+        bellyAccentLayer.opacity = Float(vectorOpacity * 0.9)
+        wingLayer.opacity = Float(vectorOpacity)
+        tailLayer.opacity = Float(vectorOpacity)
+        tailHookLayer.opacity = Float(usesPlaneImage ? flightOpacity * 0.55 : flightOpacity)
+        windowLayer.opacity = Float(vectorOpacity)
 
         CATransaction.commit()
     }
 
     private func setupLayers() {
-        bannerLayer.fillColor = NSColor(calibratedRed: 0.30, green: 0.76, blue: 0.88, alpha: 0.90).cgColor
-        bannerLayer.shadowColor = NSColor.black.cgColor
-        bannerLayer.shadowOpacity = 0.15
-        bannerLayer.shadowRadius = 10
-        bannerLayer.shadowOffset = CGSize(width: 0, height: -3)
+        bannerLayer.fillColor = NSColor(calibratedRed: 0.50, green: 0.88, blue: 0.94, alpha: 0.34).cgColor
+        bannerLayer.strokeColor = NSColor(calibratedWhite: 1, alpha: 0.46).cgColor
+        bannerLayer.lineWidth = 1.1
+        bannerLayer.shadowColor = NSColor(calibratedRed: 0.02, green: 0.45, blue: 0.72, alpha: 1).cgColor
+        bannerLayer.shadowOpacity = 0.22
+        bannerLayer.shadowRadius = 12
+        bannerLayer.shadowOffset = CGSize(width: 0, height: -2)
 
-        flagHighlightLayer.fillColor = NSColor(calibratedWhite: 1, alpha: 0.24).cgColor
+        flagHighlightLayer.fillColor = NSColor(calibratedWhite: 1, alpha: 0.32).cgColor
         ropeLayer.fillColor = nil
-        ropeLayer.strokeColor = NSColor(calibratedRed: 0.61, green: 0.88, blue: 0.94, alpha: 0.92).cgColor
-        ropeLayer.lineWidth = 1.5
+        ropeLayer.strokeColor = NSColor(calibratedRed: 0.76, green: 0.95, blue: 0.98, alpha: 0.84).cgColor
+        ropeLayer.lineWidth = 1.4
         ropeLayer.lineCap = .round
 
         textLayer.string = message
-        textLayer.foregroundColor = NSColor.white.cgColor
+        textLayer.foregroundColor = NSColor(calibratedWhite: 1, alpha: 0.96).cgColor
         textLayer.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         textLayer.fontSize = 13
         textLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
@@ -1050,10 +1057,20 @@ final class FlightView: NSView {
 
         windowLayer.fillColor = NSColor(calibratedRed: 0.03, green: 0.55, blue: 0.92, alpha: 0.88).cgColor
 
+        if let planeURL = Bundle.main.url(forResource: "FlightPlane", withExtension: "png"),
+           let planeImage = NSImage(contentsOf: planeURL) {
+            usesPlaneImage = true
+            planeImageLayer.contents = planeImage
+            planeImageLayer.contentsGravity = .resizeAspect
+            planeImageLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+            planeImageLayer.masksToBounds = false
+        }
+
         layer?.addSublayer(bannerLayer)
         layer?.addSublayer(flagHighlightLayer)
         layer?.addSublayer(textLayer)
         layer?.addSublayer(ropeLayer)
+        layer?.addSublayer(planeImageLayer)
         layer?.addSublayer(tailLayer)
         layer?.addSublayer(wingLayer)
         layer?.addSublayer(planeLayer)
@@ -1066,23 +1083,18 @@ final class FlightView: NSView {
     }
 
     private func flagPath(in rect: CGRect, wave: CGFloat) -> NSBezierPath {
-        let wave = wave * 0.55
+        let insetRect = rect.insetBy(dx: 0.8, dy: 1.2)
         let path = NSBezierPath()
-        path.move(to: CGPoint(x: rect.minX + 10, y: rect.minY + 2))
-        path.curve(to: CGPoint(x: rect.maxX - 7, y: rect.minY + 6 + wave), controlPoint1: CGPoint(x: rect.width * 0.32, y: rect.minY - 3), controlPoint2: CGPoint(x: rect.width * 0.70, y: rect.minY + 8))
-        path.curve(to: CGPoint(x: rect.maxX - 10, y: rect.maxY - 6 - wave), controlPoint1: CGPoint(x: rect.maxX + 4, y: rect.midY + 4), controlPoint2: CGPoint(x: rect.maxX - 2, y: rect.maxY - 3))
-        path.curve(to: CGPoint(x: rect.minX + 9, y: rect.maxY - 2), controlPoint1: CGPoint(x: rect.width * 0.68, y: rect.maxY - 10), controlPoint2: CGPoint(x: rect.width * 0.28, y: rect.maxY + 4))
-        path.curve(to: CGPoint(x: rect.minX + 10, y: rect.minY + 2), controlPoint1: CGPoint(x: rect.minX - 2, y: rect.maxY - 8), controlPoint2: CGPoint(x: rect.minX - 1, y: rect.minY + 8))
-        path.close()
+        path.appendRoundedRect(insetRect, xRadius: insetRect.height / 2, yRadius: insetRect.height / 2)
         return path
     }
 
     private func flagHighlightPath(in rect: CGRect) -> NSBezierPath {
         let path = NSBezierPath()
-        path.move(to: CGPoint(x: rect.minX + 15, y: rect.maxY - 10))
-        path.curve(to: CGPoint(x: rect.maxX - 20, y: rect.maxY - 10), controlPoint1: CGPoint(x: rect.width * 0.36, y: rect.maxY - 4), controlPoint2: CGPoint(x: rect.width * 0.65, y: rect.maxY - 15))
-        path.curve(to: CGPoint(x: rect.maxX - 32, y: rect.maxY - 16), controlPoint1: CGPoint(x: rect.maxX - 23, y: rect.maxY - 14), controlPoint2: CGPoint(x: rect.maxX - 27, y: rect.maxY - 16))
-        path.curve(to: CGPoint(x: rect.minX + 18, y: rect.maxY - 16), controlPoint1: CGPoint(x: rect.width * 0.62, y: rect.maxY - 21), controlPoint2: CGPoint(x: rect.width * 0.28, y: rect.maxY - 11))
+        path.move(to: CGPoint(x: rect.minX + 18, y: rect.maxY - 9))
+        path.curve(to: CGPoint(x: rect.maxX - 24, y: rect.maxY - 9), controlPoint1: CGPoint(x: rect.width * 0.34, y: rect.maxY - 3), controlPoint2: CGPoint(x: rect.width * 0.66, y: rect.maxY - 13))
+        path.line(to: CGPoint(x: rect.maxX - 36, y: rect.maxY - 13))
+        path.curve(to: CGPoint(x: rect.minX + 21, y: rect.maxY - 14), controlPoint1: CGPoint(x: rect.width * 0.62, y: rect.maxY - 19), controlPoint2: CGPoint(x: rect.width * 0.31, y: rect.maxY - 10))
         path.close()
         return path
     }

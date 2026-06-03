@@ -1,6 +1,6 @@
 # Airmessage
 
-Version: `0.1.4`
+Version: `0.1.5`
 
 一个极简 macOS 菜单栏小工具：到点时从桌面飞过一架小飞机，带一条低频消息提醒。
 
@@ -25,7 +25,7 @@ chmod +x build_dmg.sh
 ./build_dmg.sh
 ```
 
-生成的 `Airmessage-0.1.4.dmg` 打开后，把 `Airmessage.app` 拖到 `Applications` 即可。
+生成的 `Airmessage-0.1.5.dmg` 打开后，把 `Airmessage.app` 拖到 `Applications` 即可。
 
 ## 功能
 
@@ -37,7 +37,7 @@ chmod +x build_dmg.sh
 - 支持暂停、继续、立刻试飞。
 - 支持 `右 Command + 右 Option + 0` 快捷试飞，并注册系统级 `Command + Option + 0` 以便桌面空白时也能触发。
 - 飞机飞过时可用鼠标左键拖动位置，松开后继续向右飞行。
-- 白色飞机牵引湖蓝色飘旗提醒，从桌面层优雅掠过。
+- 白色飞机牵引透明毛玻璃消息气泡，从桌面层优雅掠过。
 - 内置多种 fly-by 音效，可在菜单栏开关和选择。
 
 ## 自定义音效
