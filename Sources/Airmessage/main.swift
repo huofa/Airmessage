@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import Carbon.HIToolbox
 
 private enum DefaultsKey {
     static let message = "message"
@@ -19,6 +20,19 @@ private struct SoundChoice {
     let volume: Float
 }
 
+private func airmessageHotKeyHandler(
+    _ nextHandler: EventHandlerCallRef?,
+    _ event: EventRef?,
+    _ userData: UnsafeMutableRawPointer?
+) -> OSStatus {
+    guard let userData else { return noErr }
+    let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+    Task { @MainActor in
+        delegate.handleSystemHotKey()
+    }
+    return noErr
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
@@ -31,6 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var flightWindow: FlightWindow?
     private var flightSequenceTask: Task<Void, Never>?
     private var flybyPlayer: AVAudioPlayer?
+    private var hotKeyRef: EventHotKeyRef?
+    private var hotKeyHandlerRef: EventHandlerRef?
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
     private var reminderTimer: Timer?
@@ -127,7 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupMenu() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
             if let icon = makeStatusBarIcon() {
                 button.image = icon
@@ -143,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(nextItem)
         menu.addItem(makeMenuItem(title: "打开控制面板", action: #selector(showControlPanel), keyEquivalent: "o"))
-        menu.addItem(makeMenuItem(title: "现在试飞", action: #selector(showReminderNow), keyEquivalent: "0"))
+        menu.addItem(makeMenuItem(title: "现在试飞  ⌘⌥0", action: #selector(showReminderNow), keyEquivalent: ""))
         menu.addItem(pauseItem)
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "修改提醒文字...", action: #selector(editMessage), keyEquivalent: "m"))
@@ -186,12 +202,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makeStatusBarIcon() -> NSImage? {
-        guard let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+        let iconURL = Bundle.main.url(forResource: "StatusIcon", withExtension: "png")
+            ?? Bundle.main.url(forResource: "AppIcon", withExtension: "icns")
+        guard let iconURL,
               let icon = NSImage(contentsOf: iconURL) else {
             return nil
         }
 
-        icon.size = NSSize(width: 18, height: 18)
+        icon.size = NSSize(width: 19, height: 19)
         icon.isTemplate = false
         return icon
     }
@@ -206,9 +224,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startShortcutMonitoring() {
+        registerSystemHotKey()
+
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-                  event.charactersIgnoringModifiers == "0" else {
+            guard Self.isRightCommandRightOptionZero(event) else {
                 return
             }
 
@@ -218,8 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-                  event.charactersIgnoringModifiers == "0" else {
+            guard Self.isRightCommandRightOptionZero(event) else {
                 return event
             }
 
@@ -227,6 +245,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
     }
+
+    private static func isRightCommandRightOptionZero(_ event: NSEvent) -> Bool {
+        let rawFlags = event.modifierFlags.rawValue
+        let rightCommandMask: UInt = 0x00000010
+        let rightOptionMask: UInt = 0x00000040
+        let hasRightCommand = rawFlags & rightCommandMask == rightCommandMask
+        let hasRightOption = rawFlags & rightOptionMask == rightOptionMask
+        return hasRightCommand && hasRightOption && event.keyCode == UInt16(kVK_ANSI_0)
+    }
+
+    private func registerSystemHotKey() {
+        let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: 1)
+        let modifiers = UInt32(cmdKey | optionKey)
+        RegisterEventHotKey(
+            UInt32(kVK_ANSI_0),
+            modifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+
+        var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(
+            GetApplicationEventTarget(),
+            airmessageHotKeyHandler,
+            1,
+            &eventSpec,
+            Unmanaged.passUnretained(self).toOpaque(),
+            &hotKeyHandlerRef
+        )
+    }
+
+    fileprivate func handleSystemHotKey() {
+        showReminderNow()
+    }
+
+    private static let hotKeySignature: OSType = {
+        let scalars = Array("AMsg".unicodeScalars)
+        return scalars.reduce(OSType(0)) { ($0 << 8) + OSType($1.value) }
+    }()
 
     private func scheduleNextReminder(from date: Date) {
         reminderTimer?.invalidate()
@@ -537,7 +596,7 @@ final class FlightWindow: NSWindow {
         let progress = min(1, elapsed / animationDuration)
         let eased = smoothstep(progress)
         let x = animationStartX + (animationEndX - animationStartX) * eased
-        let lift = sin(progress * .pi * 2.0) * 8
+        let lift = sin(progress * .pi * 2.0) * 12 + sin(progress * .pi * 5.0 + 0.45) * 3
         if let screenFrame = NSScreen.main?.frame {
             flightView.updateOcclusionMask(excluding: topmostUserWindowRects(in: screenFrame))
         }
@@ -834,6 +893,7 @@ final class FlightView: NSView {
     private let flagHighlightLayer = CAShapeLayer()
     private let textLayer = CATextLayer()
     private let planeLayer = CAShapeLayer()
+    private let bellyAccentLayer = CAShapeLayer()
     private let wingLayer = CAShapeLayer()
     private let tailLayer = CAShapeLayer()
     private let tailHookLayer = CAShapeLayer()
@@ -899,8 +959,8 @@ final class FlightView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
-        let flutter = sin(flightOrigin.x / 82) * 4
-        let formationBob = sin(flightOrigin.x / 48) * 2.2
+        let flutter = sin(flightOrigin.x / 82) * 4.5
+        let formationBob = sin(flightOrigin.x / 46) * 3.2 + sin(flightOrigin.x / 119) * 1.4
         let bannerFrame = CGRect(x: flightOrigin.x, y: flightOrigin.y + 24 + formationBob, width: bannerWidth, height: 32)
         bannerLayer.frame = bannerFrame
         bannerLayer.path = flagPath(in: CGRect(origin: .zero, size: bannerFrame.size), wave: flutter).cgPath
@@ -912,13 +972,15 @@ final class FlightView: NSView {
         let planeFrame = CGRect(x: bannerFrame.maxX + 20, y: flightOrigin.y + 4 + formationBob, width: 126, height: 78)
         flightHitFrame = bannerFrame.union(planeFrame)
         ropeLayer.frame = bounds
-        let tailAnchor = CGPoint(x: planeFrame.minX + 14, y: planeFrame.minY + 38)
+        let tailAnchor = CGPoint(x: planeFrame.minX + 24, y: planeFrame.minY + 43)
         ropeLayer.path = ropePath(from: CGPoint(x: bannerFrame.maxX - 8, y: bannerFrame.midY), to: tailAnchor).cgPath
         tailHookLayer.frame = CGRect(x: tailAnchor.x - 2.5, y: tailAnchor.y - 2.5, width: 5, height: 5)
         tailHookLayer.path = NSBezierPath(ovalIn: tailHookLayer.bounds).cgPath
 
         planeLayer.frame = planeFrame
         planeLayer.path = planePath(in: planeLayer.bounds).cgPath
+        bellyAccentLayer.frame = planeFrame
+        bellyAccentLayer.path = bellyAccentPath(in: bellyAccentLayer.bounds).cgPath
         wingLayer.frame = planeFrame
         wingLayer.path = wingPath(in: wingLayer.bounds).cgPath
         tailLayer.frame = planeFrame
@@ -931,6 +993,7 @@ final class FlightView: NSView {
         flagHighlightLayer.opacity = Float(flightOpacity)
         textLayer.opacity = Float(flightOpacity)
         planeLayer.opacity = Float(flightOpacity)
+        bellyAccentLayer.opacity = Float(flightOpacity * 0.9)
         wingLayer.opacity = Float(flightOpacity)
         tailLayer.opacity = Float(flightOpacity)
         tailHookLayer.opacity = Float(flightOpacity)
@@ -940,15 +1003,15 @@ final class FlightView: NSView {
     }
 
     private func setupLayers() {
-        bannerLayer.fillColor = NSColor(calibratedRed: 0.34, green: 0.74, blue: 0.82, alpha: 0.88).cgColor
+        bannerLayer.fillColor = NSColor(calibratedRed: 0.30, green: 0.76, blue: 0.88, alpha: 0.90).cgColor
         bannerLayer.shadowColor = NSColor.black.cgColor
         bannerLayer.shadowOpacity = 0.15
         bannerLayer.shadowRadius = 10
         bannerLayer.shadowOffset = CGSize(width: 0, height: -3)
 
-        flagHighlightLayer.fillColor = NSColor(calibratedWhite: 1, alpha: 0.18).cgColor
+        flagHighlightLayer.fillColor = NSColor(calibratedWhite: 1, alpha: 0.24).cgColor
         ropeLayer.fillColor = nil
-        ropeLayer.strokeColor = NSColor(calibratedRed: 0.64, green: 0.76, blue: 0.79, alpha: 0.86).cgColor
+        ropeLayer.strokeColor = NSColor(calibratedRed: 0.61, green: 0.88, blue: 0.94, alpha: 0.92).cgColor
         ropeLayer.lineWidth = 1.5
         ropeLayer.lineCap = .round
 
@@ -960,27 +1023,32 @@ final class FlightView: NSView {
         textLayer.truncationMode = .end
         textLayer.alignmentMode = .center
 
-        planeLayer.fillColor = NSColor(calibratedRed: 0.94, green: 0.97, blue: 0.98, alpha: 1).cgColor
-        planeLayer.strokeColor = NSColor(calibratedRed: 0.42, green: 0.54, blue: 0.62, alpha: 0.95).cgColor
+        planeLayer.fillColor = NSColor(calibratedRed: 0.98, green: 0.995, blue: 1.0, alpha: 1).cgColor
+        planeLayer.strokeColor = NSColor(calibratedRed: 0.55, green: 0.86, blue: 0.95, alpha: 0.88).cgColor
         planeLayer.lineWidth = 1.2
-        planeLayer.shadowColor = NSColor.black.cgColor
-        planeLayer.shadowOpacity = 0.20
-        planeLayer.shadowRadius = 10
+        planeLayer.shadowColor = NSColor(calibratedRed: 0.02, green: 0.55, blue: 0.88, alpha: 1).cgColor
+        planeLayer.shadowOpacity = 0.22
+        planeLayer.shadowRadius = 12
         planeLayer.shadowOffset = CGSize(width: 0, height: -2)
 
-        wingLayer.fillColor = NSColor(calibratedRed: 0.34, green: 0.74, blue: 0.82, alpha: 1).cgColor
-        wingLayer.strokeColor = NSColor(calibratedRed: 0.18, green: 0.52, blue: 0.62, alpha: 0.82).cgColor
+        bellyAccentLayer.fillColor = nil
+        bellyAccentLayer.strokeColor = NSColor(calibratedRed: 0.03, green: 0.55, blue: 0.96, alpha: 0.42).cgColor
+        bellyAccentLayer.lineWidth = 2.0
+        bellyAccentLayer.lineCap = .round
+
+        wingLayer.fillColor = NSColor(calibratedRed: 0.19, green: 0.83, blue: 0.92, alpha: 0.96).cgColor
+        wingLayer.strokeColor = NSColor(calibratedRed: 0.02, green: 0.59, blue: 0.92, alpha: 0.70).cgColor
         wingLayer.lineWidth = 1
 
-        tailLayer.fillColor = NSColor(calibratedRed: 0.34, green: 0.74, blue: 0.82, alpha: 1).cgColor
-        tailLayer.strokeColor = NSColor(calibratedRed: 0.18, green: 0.52, blue: 0.62, alpha: 0.82).cgColor
+        tailLayer.fillColor = NSColor(calibratedRed: 0.25, green: 0.86, blue: 0.92, alpha: 0.95).cgColor
+        tailLayer.strokeColor = NSColor(calibratedRed: 0.04, green: 0.62, blue: 0.88, alpha: 0.72).cgColor
         tailLayer.lineWidth = 1
 
-        tailHookLayer.fillColor = NSColor(calibratedRed: 0.64, green: 0.76, blue: 0.79, alpha: 0.92).cgColor
+        tailHookLayer.fillColor = NSColor(calibratedRed: 0.72, green: 0.94, blue: 0.98, alpha: 0.96).cgColor
         tailHookLayer.strokeColor = NSColor(calibratedWhite: 1, alpha: 0.72).cgColor
         tailHookLayer.lineWidth = 0.7
 
-        windowLayer.fillColor = NSColor(calibratedRed: 0.24, green: 0.45, blue: 0.58, alpha: 0.9).cgColor
+        windowLayer.fillColor = NSColor(calibratedRed: 0.03, green: 0.55, blue: 0.92, alpha: 0.88).cgColor
 
         layer?.addSublayer(bannerLayer)
         layer?.addSublayer(flagHighlightLayer)
@@ -989,6 +1057,7 @@ final class FlightView: NSView {
         layer?.addSublayer(tailLayer)
         layer?.addSublayer(wingLayer)
         layer?.addSublayer(planeLayer)
+        layer?.addSublayer(bellyAccentLayer)
         layer?.addSublayer(tailHookLayer)
         layer?.addSublayer(windowLayer)
 
@@ -1025,6 +1094,20 @@ final class FlightView: NSView {
         return path
     }
 
+    private func bellyAccentPath(in rect: CGRect) -> NSBezierPath {
+        let path = NSBezierPath()
+        let sx = rect.width / 126
+        let sy = rect.height / 78
+
+        func p(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+            NSPoint(x: x * sx, y: y * sy)
+        }
+
+        path.move(to: p(18, 31))
+        path.curve(to: p(112, 33), controlPoint1: p(38, 23), controlPoint2: p(84, 25))
+        return path
+    }
+
     private func planePath(in rect: CGRect) -> NSBezierPath {
         let path = NSBezierPath()
         let sx = rect.width / 126
@@ -1034,12 +1117,12 @@ final class FlightView: NSView {
             NSPoint(x: x * sx, y: y * sy)
         }
 
-        path.move(to: p(8, 38))
-        path.curve(to: p(76, 51), controlPoint1: p(28, 38), controlPoint2: p(51, 43))
-        path.curve(to: p(120, 40), controlPoint1: p(96, 59), controlPoint2: p(116, 55))
-        path.curve(to: p(82, 28), controlPoint1: p(122, 30), controlPoint2: p(100, 26))
-        path.curve(to: p(21, 28), controlPoint1: p(58, 30), controlPoint2: p(36, 24))
-        path.curve(to: p(8, 38), controlPoint1: p(13, 31), controlPoint2: p(9, 34))
+        path.move(to: p(7, 40))
+        path.curve(to: p(75, 52), controlPoint1: p(31, 35), controlPoint2: p(53, 44))
+        path.curve(to: p(120, 42), controlPoint1: p(96, 61), controlPoint2: p(117, 56))
+        path.curve(to: p(89, 28), controlPoint1: p(122, 33), controlPoint2: p(106, 27))
+        path.curve(to: p(28, 28), controlPoint1: p(64, 28), controlPoint2: p(43, 26))
+        path.curve(to: p(7, 40), controlPoint1: p(14, 30), controlPoint2: p(10, 35))
         path.close()
         return path
     }
@@ -1053,9 +1136,10 @@ final class FlightView: NSView {
             NSPoint(x: x * sx, y: y * sy)
         }
 
-        path.move(to: p(49, 39))
-        path.line(to: p(35, 70))
-        path.curve(to: p(75, 50), controlPoint1: p(47, 66), controlPoint2: p(62, 56))
+        path.move(to: p(48, 40))
+        path.line(to: p(35, 71))
+        path.curve(to: p(78, 50), controlPoint1: p(48, 68), controlPoint2: p(63, 58))
+        path.line(to: p(57, 38))
         path.close()
         return path
     }
@@ -1069,9 +1153,9 @@ final class FlightView: NSView {
             NSPoint(x: x * sx, y: y * sy)
         }
 
-        path.move(to: p(24, 33))
-        path.line(to: p(8, 58))
-        path.line(to: p(42, 39))
+        path.move(to: p(25, 34))
+        path.line(to: p(9, 59))
+        path.line(to: p(43, 40))
         path.close()
         return path
     }
